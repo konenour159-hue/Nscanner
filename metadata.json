@@ -1,0 +1,6 @@
+{
+  "name": "NScanner",
+  "description": "Scan. Manage. Analyze. Document scanning, PDF workspace, bilingual OCR search, and storage analytics.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

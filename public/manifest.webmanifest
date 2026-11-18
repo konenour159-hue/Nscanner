@@ -1,0 +1,17 @@
+{
+  "name": "NScanner",
+  "short_name": "NScanner",
+  "description": "Scan. Manage. Analyze. Document scanning, PDF tools, OCR search, and analytics.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#7C3AED",
+  "icons": [
+    {
+      "src": "/assets/aistudio/image_20c39404.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

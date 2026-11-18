@@ -1,0 +1,212 @@
+---
+name: DocuScan Pro
+colors:
+  surface: '#fcf8ff'
+  surface-dim: '#dbd6f4'
+  surface-bright: '#fcf8ff'
+  surface-container-lowest: '#ffffff'
+  surface-container-low: '#f6f1ff'
+  surface-container: '#f0ebff'
+  surface-container-high: '#eae5ff'
+  surface-container-highest: '#e4dffd'
+  on-surface: '#1b192e'
+  on-surface-variant: '#474554'
+  inverse-surface: '#302e44'
+  inverse-on-surface: '#f3eeff'
+  outline: '#787586'
+  outline-variant: '#c8c4d7'
+  surface-tint: '#5947d2'
+  primary: '#5441cd'
+  on-primary: '#ffffff'
+  primary-container: '#6d5ce7'
+  on-primary-container: '#fbf6ff'
+  inverse-primary: '#c7bfff'
+  secondary: '#006495'
+  on-secondary: '#ffffff'
+  secondary-container: '#6fc0fd'
+  on-secondary-container: '#004e75'
+  tertiary: '#5443c6'
+  on-tertiary: '#ffffff'
+  tertiary-container: '#6e5ee1'
+  on-tertiary-container: '#fbf6ff'
+  error: '#ba1a1a'
+  on-error: '#ffffff'
+  error-container: '#ffdad6'
+  on-error-container: '#93000a'
+  primary-fixed: '#e4dfff'
+  primary-fixed-dim: '#c7bfff'
+  on-primary-fixed: '#170065'
+  on-primary-fixed-variant: '#4129ba'
+  secondary-fixed: '#cbe6ff'
+  secondary-fixed-dim: '#8fcdff'
+  on-secondary-fixed: '#001e30'
+  on-secondary-fixed-variant: '#004b71'
+  tertiary-fixed: '#e4dfff'
+  tertiary-fixed-dim: '#c7bfff'
+  on-tertiary-fixed: '#170065'
+  on-tertiary-fixed-variant: '#412db3'
+  background: '#fcf8ff'
+  on-background: '#1b192e'
+  surface-variant: '#e4dffd'
+typography:
+  display-lg:
+    fontFamily: Manrope
+    fontSize: 32px
+    fontWeight: '700'
+    lineHeight: 40px
+  headline-lg:
+    fontFamily: Manrope
+    fontSize: 26px
+    fontWeight: '700'
+    lineHeight: 34px
+  headline-md:
+    fontFamily: Manrope
+    fontSize: 20px
+    fontWeight: '600'
+    lineHeight: 28px
+  headline-sm:
+    fontFamily: Manrope
+    fontSize: 17px
+    fontWeight: '600'
+    lineHeight: 24px
+  title-md:
+    fontFamily: Inter
+    fontSize: 15px
+    fontWeight: '600'
+    lineHeight: 20px
+  body-lg:
+    fontFamily: Inter
+    fontSize: 16px
+    fontWeight: '400'
+    lineHeight: 24px
+  body-md:
+    fontFamily: Inter
+    fontSize: 14px
+    fontWeight: '400'
+    lineHeight: 20px
+  body-sm:
+    fontFamily: Inter
+    fontSize: 12px
+    fontWeight: '400'
+    lineHeight: 16px
+  label-lg:
+    fontFamily: Inter
+    fontSize: 14px
+    fontWeight: '600'
+    lineHeight: 18px
+  label-md:
+    fontFamily: Inter
+    fontSize: 12px
+    fontWeight: '500'
+    lineHeight: 16px
+  label-sm:
+    fontFamily: Inter
+    fontSize: 11px
+    fontWeight: '600'
+    lineHeight: 14px
+rounded:
+  sm: 0.25rem
+  DEFAULT: 0.5rem
+  md: 0.75rem
+  lg: 1rem
+  xl: 1.5rem
+  full: 9999px
+spacing:
+  gutter: 0.75rem
+  margin: 1rem
+  space-xs: 0.25rem
+  space-sm: 0.5rem
+  space-md: 0.75rem
+  space-lg: 1rem
+  space-xl: 1.5rem
+---
+
+## Brand & Style
+The design system establishes a high-precision, utilitarian workspace optimized for mobile productivity and document digitization. Built around an editorial clarity and corporate-modern aesthetic, the interface prioritizes documents over decoration. 
+
+The emotional signature is dependable, razor-sharp, and effortless. Interfaces must feel crisp, immediate, and tactically organized. Structural elements remain light and unobtrusive, allowing digitized paperwork, metadata labels, and actionable workflows to surface with utmost clarity.
+
+## Colors
+The color system operates on an ultra-clean, white-first canvas. Backgrounds remain grounded in cold, pale neutrals while interactive states utilize vivid, controlled violet hues.
+
+### Palette Architecture
+- **Primary Violet (`#6D5CE7`)**: Interactive hero elements, primary actions, floating triggers, and selected document bounds.
+- **Deep Violet (`#5948CB`)**: Pressed states, active filters, and high-emphasis focal items.
+- **Soft Lavender (`#EEEAFE`)**: Subtle chip backgrounds, active row fills, and tint highlights behind primary icons.
+- **Light Blue (`#DDF2FF`)**: Information calls, secondary status badges, and processing states.
+- **Secondary Blue (`#2584BD`)**: Export flows, cloud sync cues, and complementary utility links.
+- **Pure White (`#FFFFFF`)**: Document card canvases, bottom sheets, toolbars, and input containers.
+- **Canvas Neutral (`#F6F7FB`)**: The base mobile background layer.
+- **Primary Text (`#242238`)**: High-contrast, dense typographic hierarchy for document titles and critical data.
+- **Secondary Text (`#77758A`)**: Timestamps, page counts, subheaders, and neutral utility icons.
+- **Border Neutral (`#E8E7F1`)**: Hairline dividers, card outlines, and document grid delimiters.
+
+### Semantic Tones
+- **Success (`#22A06B`)**: Successful OCR export, cloud sync completion, auto-edge detection lock.
+- **Warning (`#E9A23B`)**: Storage thresholds, low-light scan warnings, perspective skew alerts.
+- **Error (`#D94D5C`)**: Scan failures, unreadable OCR zones, destructive deletion actions.
+
+## Typography
+Typographic scale balances the structural precision of Manrope for headers and the neutral legibility of Inter for continuous reading, file paths, and metadata.
+
+- **Manrope**: Applied strictly to major document folders, modal sheet headers, and page view counters to impart a modern architectural quality.
+- **Inter**: Applied systematically to file directories, scan dates, tags, tabular metadata, form fields, and OCR reading panes.
+- **Scale Rules**: All numeric measurements (page counts, file sizes, OCR confidence) leverage tabular lining numerals for precise alignment across vertical lists.
+
+## Layout & Spacing
+The layout follows a mobile-first, strict 4px/8px incremental grid designed for dense information presentation without visual fatigue.
+
+### Layout Mechanics
+- **Mobile Grid**: 4 columns with `12px` gutters and `16px` outer margins. Document grids default to a 2-column card view or a 1-column list view.
+- **Tablet Grid**: 8 columns with `16px` gutters and `24px` outer margins, facilitating split-screen editing panes and two-up document review flows.
+- **Desktop/Tablet Landscape**: 12 columns with a persistent left rail navigation (`280px` width) and dynamic content panes.
+
+### Padding and Density
+- Compact component padding (`space-xs` and `space-sm`) maintains high information density for page indexes, tag selectors, and action sheets.
+- Modal bottom sheets and floating capture controls preserve `space-lg` to `space-xl` edge zones to avoid touch overlap with system gesture bars.
+
+## Elevation & Depth
+The system achieves depth primarily through planar separation and hairline borders, utilizing ambient shadows solely to detach active or floating elements from the scan plane.
+
+- **Level 0 (Surface Base)**: Neutral background `#F6F7FB`, completely flat.
+- **Level 1 (Card & List Rows)**: White `#FFFFFF` surfaces defined by a crisp 1px solid `#E8E7F1` border. No drop shadows.
+- **Level 2 (Dropdowns, Menus, Sticky Bars)**: White `#FFFFFF` with 1px border `#E8E7F1` paired with a delicate ambient shadow: `0 4px 16px -2px rgba(36, 34, 56, 0.06)`.
+- **Level 3 (Modal Sheets, Scan Shutter Buttons, FAB)**: Soft violet-tinted elevation: `0 8px 24px -4px rgba(109, 92, 231, 0.18)` for primary triggers, or `0 12px 32px -4px rgba(36, 34, 56, 0.12)` for sheet overlays.
+- **Camera Viewfinder**: Zero-depth, full bleed overlay with 2px stroke high-contrast `#6D5CE7` corner guides and semi-transparent dark masks (`rgba(36, 34, 56, 0.4)`).
+
+## Shapes
+The design uses a balanced radius hierarchy (`roundedness: 2`, 8px standard) to convey tactile usability without feeling childlike or overly toy-like.
+
+- **Standard Radius (`8px`)**: Applied to document thumbnails, text fields, contextual menus, and default buttons.
+- **Large Radius (`16px`)**: Applied to bottom sheet cards, document preview containers, and batch-action docks.
+- **Pill Radius (Full Curve)**: Reserved strictly for category chips, tag badges, status indicators, and the floating camera capture button.
+
+## Components
+
+### Buttons
+- **Primary**: Solid `#6D5CE7` background, `#FFFFFF` Inter bold text, `8px` corner radius, `44px` minimum tap height. Active state transitions to `#5948CB`.
+- **Secondary**: `#EEEAFE` fill, `#6D5CE7` text, no border. Used for tertiary actions such as "Add Page" or "Filter View".
+- **Outline**: Pure white surface, 1px border `#E8E7F1`, `#242238` text.
+- **Floating Shutter (Camera)**: Large 72px pill/circle, multi-ring design with `#FFFFFF` core ring and `#6D5CE7` inner trigger, equipped with Level 3 elevation.
+
+### Document Cards & List Items
+- **Grid Card**: `#FFFFFF` background, 1px `#E8E7F1` border, 8px radius. Features an aspect ratio thumbnail (4:3 or A4 ratio) with page count badge pinned to top-right (`rgba(36, 34, 56, 0.75)` fill, white text). Lower third displays title, modification date, and 3-dot overflow trigger.
+- **List Item**: Full-width white row, 1px bottom border `#E8E7F1`, 48px square thumbnail on the left, two-line text hierarchy (Title in `title-md`, date/size in `body-sm`), trailing batch select checkbox or chevron.
+
+### Chips & Filters
+- Compact height (`28px`), full pill roundedness.
+- Inactive state: `#FFFFFF` fill with 1px `#E8E7F1` border and `#77758A` text.
+- Active state: `#EEEAFE` fill, 1px `#6D5CE7` border, and `#6D5CE7` text with an optional trailing dismiss cross.
+
+### Form Inputs & Search Fields
+- Inset `#FFFFFF` fields with 1px `#E8E7F1` borders, 8px radius, `40px` height.
+- Focus state switches border to 1.5px `#6D5CE7` with zero outer glow.
+- Left-aligned utility icons rendered in `#77758A`.
+
+### Checkboxes & Selection Controls
+- Checkbox: 20px rounded square (4px radius), 1.5px border `#E8E7F1`. Checked state fills `#6D5CE7` with crisp white check mark icon.
+- Selection Overlay: Document selection triggers a subtle `#EEEAFE` overlay tint over the entire document card.
+
+### Scanner-Specific Tooling
+- **Edge Adjustment Handles**: 16px circular white nodes with 3px `#6D5CE7` border, accompanied by a dynamic 2x magnification loupe during touch interaction.
+- **Status Indicator Badges**: Subtle light pill container (`#DDF2FF` for cloud synced, `#EEEAFE` for OCR ready, `#E8E7F1` for local draft) paired with `label-sm` bold typography.
