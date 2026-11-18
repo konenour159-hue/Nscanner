@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { QuadCorners } from '../types/scanner';
+import { QuadCorners, ScanMode } from '../types/scanner';
 import { DetectedAreaResult } from '../utils/imageProcessing';
 import { Check } from 'lucide-react';
 
 interface RealtimeDocumentOverlayProps {
   detectedArea: DetectedAreaResult | null;
+  scanMode?: ScanMode;
   modeAccentColor?: string;
   isTextDetected: boolean;
   videoElement?: HTMLVideoElement | null;
@@ -13,8 +14,64 @@ interface RealtimeDocumentOverlayProps {
   onSmoothedCornersUpdate?: (corners: QuadCorners) => void;
 }
 
+interface RectBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function getDefaultRectForMode(mode: ScanMode): RectBox {
+  switch (mode) {
+    case 'id_card':
+      return { left: 0.14, top: 0.28, right: 0.86, bottom: 0.72 };
+    case 'passport':
+      return { left: 0.12, top: 0.22, right: 0.88, bottom: 0.78 };
+    case 'receipt':
+      return { left: 0.26, top: 0.1, right: 0.74, bottom: 0.9 };
+    case 'book':
+      return { left: 0.08, top: 0.18, right: 0.92, bottom: 0.82 };
+    default:
+      return { left: 0.12, top: 0.1, right: 0.88, bottom: 0.9 };
+  }
+}
+
+/**
+ * Normalizes any QuadCorners into a strictly orthogonal 90-degree rectangle
+ * so the projection surface is always clean, squared, and never oblique.
+ */
+function cornersToOrthogonalRect(corners?: QuadCorners | null, fallbackMode: ScanMode = 'document'): RectBox {
+  if (!corners) return getDefaultRectForMode(fallbackMode);
+
+  const rawLeft = (corners.topLeft.x + corners.bottomLeft.x) * 0.5;
+  const rawRight = (corners.topRight.x + corners.bottomRight.x) * 0.5;
+  const rawTop = (corners.topLeft.y + corners.topRight.y) * 0.5;
+  const rawBottom = (corners.bottomLeft.y + corners.bottomRight.y) * 0.5;
+
+  const left = Math.max(0.05, Math.min(0.4, rawLeft));
+  const right = Math.min(0.95, Math.max(0.6, rawRight));
+  const top = Math.max(0.05, Math.min(0.4, rawTop));
+  const bottom = Math.min(0.95, Math.max(0.6, rawBottom));
+
+  if (right - left < 0.3 || bottom - top < 0.28) {
+    return getDefaultRectForMode(fallbackMode);
+  }
+
+  return { left, top, right, bottom };
+}
+
+function rectToCorners(r: RectBox): QuadCorners {
+  return {
+    topLeft: { x: r.left, y: r.top },
+    topRight: { x: r.right, y: r.top },
+    bottomRight: { x: r.right, y: r.bottom },
+    bottomLeft: { x: r.left, y: r.bottom },
+  };
+}
+
 export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = ({
   detectedArea,
+  scanMode = 'document',
   isTextDetected: _isTextDetected,
   videoElement,
   autoCaptureProgress = 0,
@@ -24,7 +81,6 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
 
-  // Measure container in pixels so SVG L-brackets & strokes render crisp & unstretched
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -40,77 +96,101 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     return () => obs.disconnect();
   }, []);
 
-  const currentCornersRef = useRef<QuadCorners>({
-    topLeft: { x: 0.12, y: 0.14 },
-    topRight: { x: 0.88, y: 0.14 },
-    bottomRight: { x: 0.88, y: 0.86 },
-    bottomLeft: { x: 0.12, y: 0.86 },
+  const initialRect = getDefaultRectForMode(scanMode);
+  const currentRectRef = useRef<RectBox>({ ...initialRect });
+  const targetRectRef = useRef<RectBox>({ ...initialRect });
+  const textSurfaceRef = useRef<{ x: number; y: number; width: number; height: number }>({
+    x: 0.08,
+    y: 0.1,
+    width: 0.84,
+    height: 0.8,
   });
 
-  const [smoothedCorners, setSmoothedCorners] = useState<QuadCorners>(
-    currentCornersRef.current
-  );
-  const [dashOffset, setDashOffset] = useState<number>(0);
-  const [scanProgress, setScanProgress] = useState<number>(0.2);
+  const [smoothedRect, setSmoothedRect] = useState<RectBox>({ ...initialRect });
+  const [smoothedTextSurf, setSmoothedTextSurf] = useState(textSurfaceRef.current);
+  const [scanProgress, setScanProgress] = useState<number>(0.15);
   const miniCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const targetCornersRef = useRef<QuadCorners>(
-    detectedArea?.corners || currentCornersRef.current
-  );
+  // Sync mode switches cleanly
+  useEffect(() => {
+    if (!videoElement || videoElement.readyState < 2) {
+      const next = getDefaultRectForMode(scanMode);
+      targetRectRef.current = next;
+    }
+  }, [scanMode, videoElement]);
 
+  // Apply hysteresis deadzone before updating target rect so edges never jitter
   useEffect(() => {
     if (detectedArea?.corners) {
-      targetCornersRef.current = detectedArea.corners;
-    }
-  }, [detectedArea]);
+      const nextRect =
+        videoElement && videoElement.readyState >= 2
+          ? cornersToOrthogonalRect(detectedArea.corners, scanMode)
+          : getDefaultRectForMode(scanMode);
 
-  // 60 FPS Spring-Lerp Motion & Sweeping Laser Micro-Animations
+      const prev = targetRectRef.current;
+      const delta = Math.max(
+        Math.abs(nextRect.left - prev.left),
+        Math.abs(nextRect.top - prev.top),
+        Math.abs(nextRect.right - prev.right),
+        Math.abs(nextRect.bottom - prev.bottom)
+      );
+      if (delta > 0.012) {
+        targetRectRef.current = nextRect;
+      }
+    }
+
+    if (detectedArea?.textSurface) {
+      textSurfaceRef.current = detectedArea.textSurface;
+    }
+  }, [detectedArea, scanMode, videoElement]);
+
+  // Smooth spring-lerp + calm vertical optical sweep animation
   useEffect(() => {
     let animId: number;
-    let offset = 0;
-    let scanPos = 0;
-    let scanDirection = 1;
+    let scanPos = 0.08;
+    let scanDir = 1;
 
-    const lerp = (start: number, end: number, factor: number) => start + (end - start) * factor;
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
     const updateFrame = () => {
-      const target = targetCornersRef.current;
-      const current = currentCornersRef.current;
-      const factor = 0.22;
+      const target = targetRectRef.current;
+      const curr = currentRectRef.current;
+      const factor = 0.16;
 
-      current.topLeft.x = lerp(current.topLeft.x, target.topLeft.x, factor);
-      current.topLeft.y = lerp(current.topLeft.y, target.topLeft.y, factor);
-      current.topRight.x = lerp(current.topRight.x, target.topRight.x, factor);
-      current.topRight.y = lerp(current.topRight.y, target.topRight.y, factor);
-      current.bottomRight.x = lerp(current.bottomRight.x, target.bottomRight.x, factor);
-      current.bottomRight.y = lerp(current.bottomRight.y, target.bottomRight.y, factor);
-      current.bottomLeft.x = lerp(current.bottomLeft.x, target.bottomLeft.x, factor);
-      current.bottomLeft.y = lerp(current.bottomLeft.y, target.bottomLeft.y, factor);
+      curr.left = lerp(curr.left, target.left, factor);
+      curr.top = lerp(curr.top, target.top, factor);
+      curr.right = lerp(curr.right, target.right, factor);
+      curr.bottom = lerp(curr.bottom, target.bottom, factor);
 
-      offset = (offset + 0.85) % 24;
-      setDashOffset(offset);
+      const tsTarget = textSurfaceRef.current;
+      setSmoothedTextSurf((prev) => ({
+        x: lerp(prev.x, tsTarget.x, 0.15),
+        y: lerp(prev.y, tsTarget.y, 0.15),
+        width: lerp(prev.width, tsTarget.width, 0.15),
+        height: lerp(prev.height, tsTarget.height, 0.15),
+      }));
 
-      scanPos += 0.0075 * scanDirection;
-      if (scanPos >= 1.0) {
-        scanPos = 1.0;
-        scanDirection = -1;
-      } else if (scanPos <= 0.0) {
-        scanPos = 0.0;
-        scanDirection = 1;
+      if (!prefersReduced) {
+        scanPos += 0.0052 * scanDir;
+        if (scanPos >= 1) {
+          scanPos = 1;
+          scanDir = -1;
+        } else if (scanPos <= 0) {
+          scanPos = 0;
+          scanDir = 1;
+        }
+        setScanProgress(scanPos);
+      } else {
+        setScanProgress(0.5);
       }
-      setScanProgress(scanPos);
 
-      const updated: QuadCorners = {
-        topLeft: { ...current.topLeft },
-        topRight: { ...current.topRight },
-        bottomRight: { ...current.bottomRight },
-        bottomLeft: { ...current.bottomLeft },
-      };
-
-      setSmoothedCorners(updated);
-      if (onSmoothedCornersUpdate) {
-        onSmoothedCornersUpdate(updated);
-      }
+      const copy: RectBox = { ...curr };
+      setSmoothedRect(copy);
+      onSmoothedCornersUpdate?.(rectToCorners(copy));
 
       animId = requestAnimationFrame(updateFrame);
     };
@@ -119,14 +199,14 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     return () => cancelAnimationFrame(animId);
   }, [onSmoothedCornersUpdate]);
 
-  // Live Perspective-Rectified Mini Preview (~12 FPS using true affine triangle mesh)
+  // Live rectified thumbnail preview (~10 FPS)
   useEffect(() => {
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let isCancelled = false;
 
-    function renderLiveMiniDewarp() {
+    function renderMiniPreview() {
       if (!videoElement || videoElement.readyState < 2 || !miniCanvasRef.current) {
-        if (!isCancelled) timerId = setTimeout(renderLiveMiniDewarp, 150);
+        if (!isCancelled) timerId = setTimeout(renderMiniPreview, 180);
         return;
       }
 
@@ -136,145 +216,58 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
 
       const vidW = videoElement.videoWidth || 640;
       const vidH = videoElement.videoHeight || 480;
+      const r = currentRectRef.current;
 
-      const corners = currentCornersRef.current;
-      const p0 = { x: corners.topLeft.x * vidW, y: corners.topLeft.y * vidH };
-      const p1 = { x: corners.topRight.x * vidW, y: corners.topRight.y * vidH };
-      const p2 = { x: corners.bottomRight.x * vidW, y: corners.bottomRight.y * vidH };
-      const p3 = { x: corners.bottomLeft.x * vidW, y: corners.bottomLeft.y * vidH };
+      const sx = r.left * vidW;
+      const sy = r.top * vidH;
+      const sw = Math.max(16, (r.right - r.left) * vidW);
+      const sh = Math.max(16, (r.bottom - r.top) * vidH);
 
-      const targetW = canvas.width;
-      const targetH = canvas.height;
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, targetW, targetH);
-
-      const cols = 4;
-      const rows = 4;
-      const interp = (u: number, v: number) => {
-        const tx = p0.x + (p1.x - p0.x) * u;
-        const ty = p0.y + (p1.y - p0.y) * u;
-        const bx = p3.x + (p2.x - p3.x) * u;
-        const by = p3.y + (p2.y - p3.y) * u;
-        return { x: tx + (bx - tx) * v, y: ty + (by - ty) * v };
-      };
-
-      const drawTri = (
-        s0: { x: number; y: number },
-        s1: { x: number; y: number },
-        s2: { x: number; y: number },
-        d0: { x: number; y: number },
-        d1: { x: number; y: number },
-        d2: { x: number; y: number }
-      ) => {
-        const denom = s0.x * (s2.y - s1.y) - s1.x * s2.y + s2.x * s1.y + (s1.x - s2.x) * s0.y;
-        if (Math.abs(denom) < 0.01) return;
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(d0.x, d0.y);
-        ctx.lineTo(d1.x, d1.y);
-        ctx.lineTo(d2.x, d2.y);
-        ctx.closePath();
-        ctx.clip();
-
-        const a = -(s0.y * (d2.x - d1.x) - s1.y * d2.x + s2.y * d1.x + (s1.y - s2.y) * d0.x) / denom;
-        const b = (s1.y * d2.y + s0.y * (d1.y - d2.y) - s2.y * d1.y + (s2.y - s1.y) * d0.y) / denom;
-        const c = (s0.x * (d2.x - d1.x) - s1.x * d2.x + s2.x * d1.x + (s1.x - s2.x) * d0.x) / denom;
-        const d = -(s1.x * d2.y + s0.x * (d1.y - d2.y) - s2.x * d1.y + (s2.x - s1.x) * d0.y) / denom;
-        const e = (s0.x * (s2.y * d1.x - s1.y * d2.x) + s0.y * (s1.x * d2.x - s2.x * d1.x) + (s1.y * s2.x - s1.x * s2.y) * d0.x) / denom;
-        const f = (s0.x * (s2.y * d1.y - s1.y * d2.y) + s0.y * (s1.x * d2.y - s2.x * d1.y) + (s1.y * s2.x - s1.x * s2.y) * d0.y) / denom;
-
-        ctx.transform(a, b, c, d, e, f);
-        ctx.drawImage(videoElement, 0, 0);
-        ctx.restore();
-      };
-
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const u0 = c / cols;
-          const v0 = r / rows;
-          const u1 = (c + 1) / cols;
-          const v1 = (r + 1) / rows;
-          const sp0 = interp(u0, v0);
-          const sp1 = interp(u1, v0);
-          const sp2 = interp(u0, v1);
-          const sp3 = interp(u1, v1);
-
-          const dx0 = u0 * targetW;
-          const dy0 = v0 * targetH;
-          const dw = (u1 - u0) * targetW + 0.5;
-          const dh = (v1 - v0) * targetH + 0.5;
-
-          drawTri(sp0, sp1, sp2, { x: dx0, y: dy0 }, { x: dx0 + dw, y: dy0 }, { x: dx0, y: dy0 + dh });
-          drawTri(sp1, sp3, sp2, { x: dx0 + dw, y: dy0 }, { x: dx0 + dw, y: dy0 + dh }, { x: dx0, y: dy0 + dh });
-        }
-      }
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(videoElement, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
       if (!isCancelled) {
-        timerId = setTimeout(renderLiveMiniDewarp, 95);
+        timerId = setTimeout(renderMiniPreview, 110);
       }
     }
 
-    timerId = setTimeout(renderLiveMiniDewarp, 200);
+    timerId = setTimeout(renderMiniPreview, 200);
     return () => {
       isCancelled = true;
       if (timerId) clearTimeout(timerId);
     };
   }, [videoElement]);
 
-  const { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl } = smoothedCorners;
+  // Strict orthogonal pixel rectangle inside the viewport container
+  const rectX = Math.round(smoothedRect.left * boxSize.w);
+  const rectY = Math.round(smoothedRect.top * boxSize.h);
+  const rectW = Math.max(80, Math.round((smoothedRect.right - smoothedRect.left) * boxSize.w));
+  const rectH = Math.max(80, Math.round((smoothedRect.bottom - smoothedRect.top) * boxSize.h));
 
-  // Pixel coordinates inside container (crisp L-brackets & alignment)
-  const p0 = { x: tl.x * boxSize.w, y: tl.y * boxSize.h };
-  const p1 = { x: tr.x * boxSize.w, y: tr.y * boxSize.h };
-  const p2 = { x: br.x * boxSize.w, y: br.y * boxSize.h };
-  const p3 = { x: bl.x * boxSize.w, y: bl.y * boxSize.h };
+  // Polished inner rectangular text surface strictly aligned with document rect
+  const textX = Math.round(rectX + smoothedTextSurf.x * rectW);
+  const textY = Math.round(rectY + smoothedTextSurf.y * rectH);
+  const textW = Math.max(48, Math.round(smoothedTextSurf.width * rectW));
+  const textH = Math.max(40, Math.round(smoothedTextSurf.height * rectH));
 
-  const polygonPoints = `${p0.x},${p0.y} ${p1.x},${p1.y} ${p2.x},${p2.y} ${p3.x},${p3.y}`;
+  // Optical scan sweep coordinate clipped inside the rounded rectangle
+  const sweepY = textY + scanProgress * textH;
+  const trailHeight = 32;
 
-  const scanP1 = {
-    x: p0.x + (p3.x - p0.x) * scanProgress,
-    y: p0.y + (p3.y - p0.y) * scanProgress,
-  };
-  const scanP2 = {
-    x: p1.x + (p2.x - p1.x) * scanProgress,
-    y: p1.y + (p2.y - p1.y) * scanProgress,
-  };
+  const isLocked = autoCaptureEnabled && autoCaptureProgress > 0.08;
+  const bracketLeg = Math.min(22, Math.max(14, Math.round(Math.min(rectW, rectH) * 0.08)));
 
-  const prevProgress = Math.max(0, scanProgress - 0.08);
-  const trailP1 = {
-    x: p0.x + (p3.x - p0.x) * prevProgress,
-    y: p0.y + (p3.y - p0.y) * prevProgress,
-  };
-  const trailP2 = {
-    x: p1.x + (p2.x - p1.x) * prevProgress,
-    y: p1.y + (p2.y - p1.y) * prevProgress,
-  };
-  const trailPoints = `${scanP1.x},${scanP1.y} ${scanP2.x},${scanP2.y} ${trailP2.x},${trailP2.y} ${trailP1.x},${trailP1.y}`;
-
-  const gridH1 = {
-    x1: (p0.x * 2 + p3.x) / 3,
-    y1: (p0.y * 2 + p3.y) / 3,
-    x2: (p1.x * 2 + p2.x) / 3,
-    y2: (p1.y * 2 + p2.y) / 3,
-  };
-  const gridH2 = {
-    x1: (p0.x + p3.x * 2) / 3,
-    y1: (p0.y + p3.y * 2) / 3,
-    x2: (p1.x + p2.x * 2) / 3,
-    y2: (p1.y + p2.y * 2) / 3,
-  };
-  const gridV1 = {
-    x1: (p0.x * 2 + p1.x) / 3,
-    y1: (p0.y * 2 + p1.y) / 3,
-    x2: (p3.x * 2 + p2.x) / 3,
-    y2: (p3.y * 2 + p2.y) / 3,
-  };
-  const gridV2 = {
-    x1: (p0.x + p1.x * 2) / 3,
-    y1: (p0.y + p1.y * 2) / 3,
-    x2: (p3.x + p2.x * 2) / 3,
-    y2: (p3.y + p2.y * 2) / 3,
-  };
+  // Clean aligned orthogonal text baseline guides inside polished text surface
+  const detectedBands = detectedArea?.textBands?.length
+    ? detectedArea.textBands.slice(0, 8)
+    : [
+        { x: 0.1, y: 0.18, width: 0.72, height: 0.025 },
+        { x: 0.1, y: 0.3, width: 0.78, height: 0.025 },
+        { x: 0.1, y: 0.42, width: 0.68, height: 0.025 },
+        { x: 0.1, y: 0.54, width: 0.75, height: 0.025 },
+        { x: 0.1, y: 0.66, width: 0.58, height: 0.025 },
+      ];
 
   return (
     <div ref={containerRef} className="absolute inset-0 pointer-events-none z-10 overflow-hidden">
@@ -285,188 +278,155 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
         className="w-full h-full absolute inset-0"
       >
         <defs>
-          <mask id="smooth-camera-quad-mask">
+          {/* Outer vignette cutout strictly matching the square/rounded document rect */}
+          <mask id="ns-square-doc-mask">
             <rect width={boxSize.w} height={boxSize.h} fill="white" />
-            <polygon points={polygonPoints} fill="black" />
+            <rect x={rectX} y={rectY} width={rectW} height={rectH} rx="10" fill="black" />
           </mask>
 
-          <filter id="laser-glow" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="3" result="coloredBlur" />
-            <feMerge>
-              <feMergeNode in="coloredBlur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
+          {/* Clip micro-animations cleanly inside the document rect */}
+          <clipPath id="ns-doc-clip">
+            <rect x={rectX} y={rectY} width={rectW} height={rectH} rx="10" />
+          </clipPath>
 
-          {/* Very Light Transparent Blue Document Projection Layer */}
-          <linearGradient id="light-blue-doc-wash" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.16" />
-            <stop offset="50%" stopColor="#60A5FA" stopOpacity="0.10" />
-            <stop offset="100%" stopColor="#2563EB" stopOpacity="0.14" />
+          {/* Very light, almost-transparent blue document surface gradient */}
+          <linearGradient id="ns-blue-surface-wash" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#60A5FA" stopOpacity="0.11" />
+            <stop offset="50%" stopColor="#3B82F6" stopOpacity="0.06" />
+            <stop offset="100%" stopColor="#2563EB" stopOpacity="0.10" />
           </linearGradient>
 
-          <linearGradient id="laser-beam-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#60A5FA" stopOpacity="0.2" />
-            <stop offset="50%" stopColor="#93C5FD" stopOpacity="1" />
-            <stop offset="100%" stopColor="#60A5FA" stopOpacity="0.2" />
+          {/* Slightly clearer blue polish strictly over the rectangular text zone */}
+          <linearGradient id="ns-text-surface-polish" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#93C5FD" stopOpacity="0.14" />
+            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.08" />
           </linearGradient>
 
-          <linearGradient id="scan-trail-grad" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.25" />
-            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.0" />
+          {/* Soft vertical optical scan trail */}
+          <linearGradient id="ns-scan-trail" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#60A5FA" stopOpacity="0" />
+            <stop offset="100%" stopColor="#93C5FD" stopOpacity="0.22" />
           </linearGradient>
         </defs>
 
-        {/* Semi-transparent dark vignette outside quadrilateral */}
+        {/* Soft dimmed surround outside the square document boundary */}
         <rect
           width={boxSize.w}
           height={boxSize.h}
-          fill="rgba(0, 0, 0, 0.42)"
-          mask="url(#smooth-camera-quad-mask)"
+          fill="rgba(10, 15, 28, 0.36)"
+          mask="url(#ns-square-doc-mask)"
         />
 
-        {/* VERY LIGHT TRANSPARENT BLUE DOCUMENT OVERLAY */}
-        <polygon points={polygonPoints} fill="url(#light-blue-doc-wash)" />
+        {/* Light translucent blue projection wash over full document rectangle */}
+        <rect
+          x={rectX}
+          y={rectY}
+          width={rectW}
+          height={rectH}
+          rx="10"
+          fill="url(#ns-blue-surface-wash)"
+          stroke="rgba(147, 197, 253, 0.62)"
+          strokeWidth="1.25"
+        />
 
-        {/* 3D Perspective Rule-of-Thirds Grid */}
-        {[gridH1, gridH2, gridV1, gridV2].map((g, idx) => (
-          <line
-            key={idx}
-            x1={g.x1}
-            y1={g.y1}
-            x2={g.x2}
-            y2={g.y2}
-            stroke="#60A5FA"
-            strokeWidth="1.2"
-            strokeOpacity="0.35"
-            strokeDasharray="4 4"
+        {/* Clipped interior polished text surface & micro scanline */}
+        <g clipPath="url(#ns-doc-clip)">
+          {/* Polished rectangular text-surface plate (strictly square/orthogonal) */}
+          <rect
+            x={textX}
+            y={textY}
+            width={textW}
+            height={textH}
+            rx="6"
+            fill="url(#ns-text-surface-polish)"
+            stroke="rgba(191, 219, 254, 0.34)"
+            strokeWidth="1"
           />
-        ))}
 
-        {/* Sweeping Scanline Trail & Laser Beam */}
-        <polygon points={trailPoints} fill="url(#scan-trail-grad)" />
-        <line
-          x1={scanP1.x}
-          y1={scanP1.y}
-          x2={scanP2.x}
-          y2={scanP2.y}
-          stroke="url(#laser-beam-grad)"
-          strokeWidth="2.5"
-          filter="url(#laser-glow)"
-        />
-
-        {/* Animated Marching Dash Quad Boundary */}
-        <polygon
-          points={polygonPoints}
-          fill="none"
-          stroke="#3B82F6"
-          strokeWidth="2.5"
-          strokeDasharray="14 7"
-          strokeDashoffset={-dashOffset}
-          filter="url(#laser-glow)"
-        />
-
-        <polygon
-          points={polygonPoints}
-          fill="none"
-          stroke="#BFDBFE"
-          strokeWidth="1"
-          strokeOpacity="0.75"
-        />
-
-        {/* Detected Letter/Text Bands (Pulsing blue highlights) */}
-        {detectedArea?.textBands &&
-          detectedArea.textBands.map((band, idx) => {
-            const bandLeft = p0.x + band.x * (p1.x - p0.x);
-            const bandTop = p0.y + band.y * (p3.y - p0.y);
-            const bandWidth = Math.max(8, band.width * (p1.x - p0.x));
-            const bandHeight = Math.max(4, band.height * (p3.y - p0.y));
-            const isNearScanline = Math.abs(band.y - scanProgress) < 0.12;
+          {/* Subtle clean rectangular alignment bars across detected text rows */}
+          {detectedBands.map((band, idx) => {
+            const bx = Math.round(rectX + Math.max(0.08, band.x) * rectW);
+            const by = Math.round(rectY + band.y * rectH);
+            const bw = Math.max(24, Math.min(rectW - (bx - rectX) - 16, Math.round(band.width * rectW)));
+            const distFromSweep = Math.abs(by - sweepY);
+            const isHighlighted = distFromSweep < 26;
 
             return (
               <rect
                 key={idx}
-                x={bandLeft}
-                y={bandTop}
-                width={bandWidth}
-                height={bandHeight}
-                rx="3"
-                fill={isNearScanline ? 'rgba(147, 197, 253, 0.45)' : 'rgba(59, 130, 246, 0.22)'}
-                stroke={isNearScanline ? '#BFDBFE' : 'rgba(147, 197, 253, 0.6)'}
-                strokeWidth={isNearScanline ? '1.5' : '1'}
+                x={bx}
+                y={by}
+                width={bw}
+                height={Math.max(3, Math.round(Math.min(6, band.height * rectH * 0.45)))}
+                rx="1.5"
+                fill={isHighlighted ? 'rgba(191, 219, 254, 0.42)' : 'rgba(147, 197, 253, 0.16)'}
               />
             );
           })}
 
-        {/* 4 Crisp Pixel-Scaled Targeting Reticles & Micro L-Brackets */}
+          {/* Gentle optical scan gradient trail + crisp hairline beam */}
+          <rect
+            x={textX}
+            y={sweepY - trailHeight}
+            width={textW}
+            height={trailHeight}
+            fill="url(#ns-scan-trail)"
+          />
+          <line
+            x1={textX}
+            y1={sweepY}
+            x2={textX + textW}
+            y2={sweepY}
+            stroke="rgba(191, 219, 254, 0.92)"
+            strokeWidth="1.5"
+          />
+        </g>
+
+        {/* 4 Precision Architectural Corner L-Brackets */}
         {[
-          { pt: p0, dx: 1, dy: 1 },
-          { pt: p1, dx: -1, dy: 1 },
-          { pt: p2, dx: -1, dy: -1 },
-          { pt: p3, dx: 1, dy: -1 },
-        ].map(({ pt, dx, dy }, idx) => (
-          <g key={idx}>
-            <circle
-              cx={pt.x}
-              cy={pt.y}
-              r="13"
-              fill="none"
-              stroke="#60A5FA"
-              strokeWidth="1.5"
-              strokeOpacity="0.45"
-            />
-            <circle
-              cx={pt.x}
-              cy={pt.y}
-              r="7.5"
-              fill="none"
-              stroke="#FFFFFF"
-              strokeWidth="2"
-            />
-            <circle cx={pt.x} cy={pt.y} r="4" fill="#2563EB" />
-            <path
-              d={`M ${pt.x + dx * 18} ${pt.y} L ${pt.x} ${pt.y} L ${pt.x} ${pt.y + dy * 18}`}
-              fill="none"
-              stroke="#93C5FD"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-            />
-          </g>
+          // Top-Left
+          `M ${rectX} ${rectY + bracketLeg} L ${rectX} ${rectY} L ${rectX + bracketLeg} ${rectY}`,
+          // Top-Right
+          `M ${rectX + rectW - bracketLeg} ${rectY} L ${rectX + rectW} ${rectY} L ${rectX + rectW} ${rectY + bracketLeg}`,
+          // Bottom-Right
+          `M ${rectX + rectW} ${rectY + rectH - bracketLeg} L ${rectX + rectW} ${rectY + rectH} L ${rectX + rectW - bracketLeg} ${rectY + rectH}`,
+          // Bottom-Left
+          `M ${rectX + bracketLeg} ${rectY + rectH} L ${rectX} ${rectY + rectH} L ${rectX} ${rectY + rectH - bracketLeg}`,
+        ].map((pathD, idx) => (
+          <path
+            key={idx}
+            d={pathD}
+            fill="none"
+            stroke="#93C5FD"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         ))}
       </svg>
 
-      {/* TOP FLOATING STATUS HUD: Auto-Projection Permanently Active + Auto-Capture Lock */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-blue-500/60 backdrop-blur-md flex items-center gap-2.5 text-xs shadow-2xl select-none">
-        <span className="inline-flex rounded-full h-2 w-2 bg-blue-400" />
-        <span className="font-semibold text-blue-200 tracking-wide text-[11px] whitespace-nowrap">
-          AUTO-PROJECTION ON
+      {/* Clean Minimal Projection Status Pill */}
+      <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-slate-950/75 border border-blue-400/35 backdrop-blur-md flex items-center gap-2 text-[11px] text-blue-100 select-none">
+        <span className="font-medium tracking-tight whitespace-nowrap">
+          {isLocked ? `Hold steady · ${Math.round(autoCaptureProgress * 100)}%` : 'Auto-Projection Aligned'}
         </span>
-        <span className="text-[10px] text-slate-400 font-mono whitespace-nowrap">
-          {detectedArea && detectedArea.skewAngleDeg > 0.4
-            ? `Dewarp ${detectedArea.skewAngleDeg.toFixed(1)}°`
-            : 'Aligned'}
-        </span>
-        {autoCaptureEnabled && autoCaptureProgress > 0.08 && (
-          <span className="flex items-center gap-1 pl-2 border-l border-slate-700 text-[10px] font-mono text-emerald-300 whitespace-nowrap">
-            <span>Hold steady</span>
-            <span>{Math.round(autoCaptureProgress * 100)}%</span>
-          </span>
-        )}
       </div>
 
-      {/* BOTTOM-RIGHT CORNER: Real-Time Live Perspective-Straightened Preview Mini HUD */}
-      <div className="absolute bottom-24 right-4 z-20 hidden sm:flex flex-col items-center bg-slate-950/85 backdrop-blur-md p-1.5 rounded-xl border border-blue-500/40 shadow-2xl">
-        <canvas
-          ref={miniCanvasRef}
-          width={100}
-          height={135}
-          className="rounded-lg border border-slate-700 bg-white shadow-inner"
-        />
-        <div className="text-[9px] font-mono text-blue-300 mt-1 flex items-center gap-1">
-          <Check className="w-2.5 h-2.5 text-blue-400" />
-          <span>Live Rectified Doc</span>
+      {/* Live Straightened Preview Thumbnail (Desktop / Tablet viewports when camera is active) */}
+      {videoElement && videoElement.readyState >= 2 && (
+        <div className="absolute bottom-3 right-3 z-20 hidden sm:flex flex-col items-center bg-slate-950/80 backdrop-blur-md p-1.5 rounded-lg border border-blue-400/35 shadow-lg">
+          <canvas
+            ref={miniCanvasRef}
+            width={84}
+            height={112}
+            className="rounded border border-slate-700 bg-white"
+          />
+          <div className="text-[9px] font-medium text-blue-200 mt-1 flex items-center gap-1">
+            <Check className="w-2.5 h-2.5 text-blue-400" />
+            <span>Aligned</span>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

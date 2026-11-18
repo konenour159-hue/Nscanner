@@ -798,75 +798,35 @@ export async function splitBookPages(
 
 export interface DetectedAreaResult {
   corners: QuadCorners;
+  textSurface?: { x: number; y: number; width: number; height: number };
   textBands: { x: number; y: number; width: number; height: number }[];
   confidence: number; // 0 to 1
   skewAngleDeg: number;
 }
 
 /**
- * Fits a robust line (y = m*x + b or x = m*y + b) using trimmed least squares
- * so outlier desk textures do not skew the detected quadrilateral edges.
+ * Helper: trimmed median of sorted boundary samples so desk shadows/noise
+ * do not pull a rectangle edge out of alignment.
  */
-function fitLineRobust(
-  pts: Array<{ u: number; v: number }>,
-  defaultU: number
-): { m: number; b: number; valid: boolean } {
-  if (pts.length < 4) return { m: 0, b: defaultU, valid: false };
-
-  // Compute median u to reject wild outliers first
-  const sortedU = [...pts].map((p) => p.u).sort((a, b) => a - b);
-  const medU = sortedU[Math.floor(sortedU.length / 2)];
-  const inliers = pts.filter((p) => Math.abs(p.u - medU) < 0.16);
-  const used = inliers.length >= 4 ? inliers : pts;
-
-  let sumV = 0;
-  let sumU = 0;
-  let sumVV = 0;
-  let sumVU = 0;
-  for (const p of used) {
-    sumV += p.v;
-    sumU += p.u;
-    sumVV += p.v * p.v;
-    sumVU += p.v * p.u;
-  }
-  const n = used.length;
-  const denom = n * sumVV - sumV * sumV;
-  if (Math.abs(denom) < 1e-6) {
-    return { m: 0, b: sumU / n, valid: true };
-  }
-  const m = (n * sumVU - sumV * sumU) / denom;
-  const b = (sumU - m * sumV) / n;
-  // Clamp unreasonable slant angles
-  const clampedM = Math.max(-0.45, Math.min(0.45, m));
-  const adjustedB = sumU / n - clampedM * (sumV / n);
-  return { m: clampedM, b: adjustedB, valid: true };
-}
-
-function intersectLines(
-  horiz: { m: number; b: number }, // y = m*x + b
-  vert: { m: number; b: number }   // x = m*y + b
-): { x: number; y: number } {
-  // x = vert.m * (horiz.m * x + horiz.b) + vert.b
-  const denom = 1 - vert.m * horiz.m;
-  if (Math.abs(denom) < 1e-4) {
-    return { x: vert.b, y: horiz.b };
-  }
-  const x = (vert.m * horiz.b + vert.b) / denom;
-  const y = horiz.m * x + horiz.b;
-  return {
-    x: Math.max(0.03, Math.min(0.97, x)),
-    y: Math.max(0.03, Math.min(0.97, y)),
-  };
+function trimmedMedian(values: number[], fallback: number): { value: number; spread: number; valid: boolean } {
+  if (values.length < 4) return { value: fallback, spread: 0, valid: false };
+  const sorted = [...values].sort((a, b) => a - b);
+  const lo = Math.floor(sorted.length * 0.2);
+  const hi = Math.max(lo + 1, Math.ceil(sorted.length * 0.8));
+  const core = sorted.slice(lo, hi);
+  const median = core[Math.floor(core.length / 2)];
+  const spread = core[core.length - 1] - core[0];
+  return { value: median, spread, valid: true };
 }
 
 /**
- * REAL 4-CORNER QUADRILATERAL EDGE & TEXT PROJECTION DETECTOR:
- * 1. Samples perimeter desk color & luminance.
+ * ORTHOGONAL DOCUMENT & POLISHED TEXT-SURFACE DETECTOR:
+ * 1. Estimates border background luminance & color.
  * 2. Computes Sobel gradient + paper-vs-background contrast map.
- * 3. Scans inward from Top, Bottom, Left, and Right edges along multiple rays
- *    to locate genuine document edge points.
- * 4. Fits 4 straight edge lines robustly and intersects them to obtain a true
- *    perspective trapezoid (QuadCorners) + skew angle + text line bands.
+ * 3. Locates clean Top/Bottom/Left/Right paper edges via trimmed median rays
+ *    and locks them to a true 90° rectangle (never an oblique polygon).
+ * 4. Computes a clean rectangular `textSurface` bounding region around detected
+ *    text strokes plus aligned text-line bands strictly inside the rectangle.
  */
 export async function detectDocumentAndTextCorners(
   source: string | HTMLCanvasElement | HTMLVideoElement
@@ -874,24 +834,24 @@ export async function detectDocumentAndTextCorners(
   const analysisW = 220;
   const analysisH = 220;
 
+  const fallbackResult: DetectedAreaResult = {
+    corners: {
+      topLeft: { x: 0.1, y: 0.1 },
+      topRight: { x: 0.9, y: 0.1 },
+      bottomRight: { x: 0.9, y: 0.9 },
+      bottomLeft: { x: 0.1, y: 0.9 },
+    },
+    textSurface: { x: 0.08, y: 0.1, width: 0.84, height: 0.8 },
+    textBands: [],
+    confidence: 0.65,
+    skewAngleDeg: 0,
+  };
+
   const canvas = document.createElement('canvas');
   canvas.width = analysisW;
   canvas.height = analysisH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  if (!ctx) {
-    return {
-      corners: {
-        topLeft: { x: 0.08, y: 0.08 },
-        topRight: { x: 0.92, y: 0.08 },
-        bottomRight: { x: 0.92, y: 0.92 },
-        bottomLeft: { x: 0.08, y: 0.92 },
-      },
-      textBands: [],
-      confidence: 0.5,
-      skewAngleDeg: 0,
-    };
-  }
+  if (!ctx) return fallbackResult;
 
   if (typeof source === 'string') {
     const img = await loadImage(source);
@@ -910,7 +870,7 @@ export async function detectDocumentAndTextCorners(
     gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
   }
 
-  // Estimate outer border background RGB + luminance
+  // Sample outer border background RGB + luminance
   let borderR = 0;
   let borderG = 0;
   let borderB = 0;
@@ -931,7 +891,6 @@ export async function detectDocumentAndTextCorners(
   const bgB = borderB / Math.max(1, borderCount);
   const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
 
-  // Compute Sobel gradient magnitude + foreground contrast score
   const edgeScore = new Float32Array(totalPx);
   const textEnergyRows = new Float32Array(analysisH);
   let minTextX = analysisW;
@@ -963,18 +922,16 @@ export async function detectDocumentAndTextCorners(
         Math.abs(data[pxIdx + 1] - bgG) +
         Math.abs(data[pxIdx + 2] - bgB);
 
-      // Edge score combines Sobel gradient and transition away from border desk tone
       edgeScore[idx] = mag * 0.7 + colorDist * 0.35;
 
-      // Text line horizontal stroke detection inside interior region
       const lum = gray[idx];
       if (
         x > 16 &&
         x < analysisW - 16 &&
         y > 16 &&
         y < analysisH - 16 &&
-        Math.abs(gx) > 32 &&
-        lum < 215
+        Math.abs(gx) > 34 &&
+        lum < 210
       ) {
         textEnergyRows[y] += Math.abs(gx);
         if (x < minTextX) minTextX = x;
@@ -983,113 +940,98 @@ export async function detectDocumentAndTextCorners(
     }
   }
 
-  // Detect edge points along 22 rays per side (from 15% to 85% span)
-  const topPts: Array<{ u: number; v: number }> = [];
-  const bottomPts: Array<{ u: number; v: number }> = [];
-  const leftPts: Array<{ u: number; v: number }> = [];
-  const rightPts: Array<{ u: number; v: number }> = [];
+  const topSamples: number[] = [];
+  const bottomSamples: number[] = [];
+  const leftSamples: number[] = [];
+  const rightSamples: number[] = [];
 
   const rayCount = 20;
-  const edgeThreshold = 68;
+  const edgeThreshold = 72;
 
   for (let i = 0; i < rayCount; i++) {
-    const frac = 0.18 + (i / (rayCount - 1)) * 0.64;
+    const frac = 0.2 + (i / (rayCount - 1)) * 0.6;
     const rx = Math.round(frac * analysisW);
     const ry = Math.round(frac * analysisH);
 
-    // Top scan (downward to 45% height)
-    let bestTopY = -1;
-    let bestTopScore = edgeThreshold;
-    for (let y = 6; y < Math.round(analysisH * 0.45); y++) {
+    for (let y = 6; y < Math.round(analysisH * 0.44); y++) {
       const s = edgeScore[y * analysisW + rx];
       const nextBright = gray[Math.min(analysisH - 1, y + 4) * analysisW + rx];
-      if (s > bestTopScore && (nextBright > bgLum + 18 || s > 135)) {
-        bestTopScore = s;
-        bestTopY = y;
+      if (s > edgeThreshold && (nextBright > bgLum + 18 || s > 140)) {
+        topSamples.push(y / analysisH);
         break;
       }
     }
-    if (bestTopY > 0) topPts.push({ v: rx / analysisW, u: bestTopY / analysisH });
 
-    // Bottom scan (upward from bottom to 55% height)
-    let bestBotY = -1;
-    let bestBotScore = edgeThreshold;
-    for (let y = analysisH - 7; y > Math.round(analysisH * 0.55); y--) {
+    for (let y = analysisH - 7; y > Math.round(analysisH * 0.56); y--) {
       const s = edgeScore[y * analysisW + rx];
       const prevBright = gray[Math.max(0, y - 4) * analysisW + rx];
-      if (s > bestBotScore && (prevBright > bgLum + 18 || s > 135)) {
-        bestBotScore = s;
-        bestBotY = y;
+      if (s > edgeThreshold && (prevBright > bgLum + 18 || s > 140)) {
+        bottomSamples.push(y / analysisH);
         break;
       }
     }
-    if (bestBotY > 0) bottomPts.push({ v: rx / analysisW, u: bestBotY / analysisH });
 
-    // Left scan (rightward to 45% width)
-    let bestLeftX = -1;
-    let bestLeftScore = edgeThreshold;
-    for (let x = 6; x < Math.round(analysisW * 0.45); x++) {
+    for (let x = 6; x < Math.round(analysisW * 0.44); x++) {
       const s = edgeScore[ry * analysisW + x];
       const nextBright = gray[ry * analysisW + Math.min(analysisW - 1, x + 4)];
-      if (s > bestLeftScore && (nextBright > bgLum + 18 || s > 135)) {
-        bestLeftScore = s;
-        bestLeftX = x;
+      if (s > edgeThreshold && (nextBright > bgLum + 18 || s > 140)) {
+        leftSamples.push(x / analysisW);
         break;
       }
     }
-    if (bestLeftX > 0) leftPts.push({ v: ry / analysisH, u: bestLeftX / analysisW });
 
-    // Right scan (leftward to 55% width)
-    let bestRightX = -1;
-    let bestRightScore = edgeThreshold;
-    for (let x = analysisW - 7; x > Math.round(analysisW * 0.55); x--) {
+    for (let x = analysisW - 7; x > Math.round(analysisW * 0.56); x--) {
       const s = edgeScore[ry * analysisW + x];
       const prevBright = gray[ry * analysisW + Math.max(0, x - 4)];
-      if (s > bestRightScore && (prevBright > bgLum + 18 || s > 135)) {
-        bestRightScore = s;
-        bestRightX = x;
+      if (s > edgeThreshold && (prevBright > bgLum + 18 || s > 140)) {
+        rightSamples.push(x / analysisW);
         break;
       }
     }
-    if (bestRightX > 0) rightPts.push({ v: ry / analysisH, u: bestRightX / analysisW });
   }
 
-  const topLine = fitLineRobust(topPts, 0.09);
-  const bottomLine = fitLineRobust(bottomPts, 0.91);
-  const leftLine = fitLineRobust(leftPts, 0.09);
-  const rightLine = fitLineRobust(rightPts, 0.91);
+  const topEdge = trimmedMedian(topSamples, 0.1);
+  const bottomEdge = trimmedMedian(bottomSamples, 0.9);
+  const leftEdge = trimmedMedian(leftSamples, 0.1);
+  const rightEdge = trimmedMedian(rightSamples, 0.9);
 
-  const tl = intersectLines(topLine, leftLine);
-  const tr = intersectLines(topLine, rightLine);
-  const br = intersectLines(bottomLine, rightLine);
-  const bl = intersectLines(bottomLine, leftLine);
+  let left = Math.max(0.05, Math.min(0.32, leftEdge.value));
+  let right = Math.min(0.95, Math.max(0.68, rightEdge.value));
+  let top = Math.max(0.05, Math.min(0.32, topEdge.value));
+  let bottom = Math.min(0.95, Math.max(0.68, bottomEdge.value));
 
-  // Sanity-check quad area so degenerate intersections never collapse
-  const quadWidth = Math.min(tr.x - tl.x, br.x - bl.x);
-  const quadHeight = Math.min(bl.y - tl.y, br.y - tr.y);
-  const isQuadValid = quadWidth > 0.25 && quadHeight > 0.25;
+  const rectW = right - left;
+  const rectH = bottom - top;
+  const isRectValid = rectW > 0.36 && rectH > 0.36;
 
-  const corners: QuadCorners = isQuadValid
-    ? {
-        topLeft: tl,
-        topRight: tr,
-        bottomRight: br,
-        bottomLeft: bl,
-      }
-    : {
-        topLeft: { x: 0.09, y: 0.1 },
-        topRight: { x: 0.91, y: 0.1 },
-        bottomRight: { x: 0.91, y: 0.9 },
-        bottomLeft: { x: 0.09, y: 0.9 },
-      };
+  if (!isRectValid) {
+    left = 0.1;
+    top = 0.1;
+    right = 0.9;
+    bottom = 0.9;
+  }
 
-  // Identify Text Lines & Bounding Blocks relative to quad
+  // Strictly orthogonal 90° rectangle corners (never an oblique polygon)
+  const corners: QuadCorners = {
+    topLeft: { x: left, y: top },
+    topRight: { x: right, y: top },
+    bottomRight: { x: right, y: bottom },
+    bottomLeft: { x: left, y: bottom },
+  };
+
+  // Detect strictly rectangular text-line bands inside the locked orthogonal frame
   const textBands: { x: number; y: number; width: number; height: number }[] = [];
   let inBand = false;
   let bandStartY = 0;
 
-  const bandMinX = minTextX < analysisW ? Math.max(0.08, minTextX / analysisW) : 0.12;
-  const bandMaxX = maxTextX > 0 ? Math.min(0.92, maxTextX / analysisW) : 0.88;
+  const boxW = Math.max(0.3, right - left);
+  const boxH = Math.max(0.3, bottom - top);
+
+  const bandMinX = minTextX < analysisW ? Math.max(left + 0.03, minTextX / analysisW) : left + boxW * 0.08;
+  const bandMaxX = maxTextX > 0 ? Math.min(right - 0.03, maxTextX / analysisW) : right - boxW * 0.08;
+
+  let minBandTop = 1;
+  let maxBandBot = 0;
 
   for (let y = 12; y < analysisH - 12; y++) {
     const energy = textEnergyRows[y];
@@ -1101,30 +1043,48 @@ export async function detectDocumentAndTextCorners(
     } else if (inBand) {
       inBand = false;
       const bandH = y - bandStartY;
-      if (bandH >= 3 && bandH <= 36) {
-        textBands.push({
-          x: Math.max(0.06, (bandMinX - corners.topLeft.x) / Math.max(0.3, corners.topRight.x - corners.topLeft.x)),
-          y: Math.max(0.04, (bandStartY / analysisH - corners.topLeft.y) / Math.max(0.3, corners.bottomLeft.y - corners.topLeft.y)),
-          width: Math.min(0.86, (bandMaxX - bandMinX) / Math.max(0.3, corners.topRight.x - corners.topLeft.x)),
-          height: Math.min(0.12, bandH / analysisH / Math.max(0.3, corners.bottomLeft.y - corners.topLeft.y)),
-        });
+      if (bandH >= 3 && bandH <= 32) {
+        const relX = Math.max(0.06, Math.min(0.22, (bandMinX - left) / boxW));
+        const relY = Math.max(0.05, Math.min(0.9, (bandStartY / analysisH - top) / boxH));
+        const relW = Math.max(0.35, Math.min(0.88 - relX, (bandMaxX - bandMinX) / boxW));
+        const relH = Math.max(0.02, Math.min(0.08, bandH / analysisH / boxH));
+
+        textBands.push({ x: relX, y: relY, width: relW, height: relH });
+        if (relY < minBandTop) minBandTop = relY;
+        if (relY + relH > maxBandBot) maxBandBot = relY + relH;
       }
     }
   }
 
-  // Real skew angle from top/left edge slopes
-  const topSlopeDeg = (Math.atan(topLine.m) * 180) / Math.PI;
-  const leftSlopeDeg = (Math.atan(leftLine.m) * 180) / Math.PI;
-  const skewAngleDeg = Math.max(Math.abs(topSlopeDeg), Math.abs(leftSlopeDeg));
+  // Polished rectangular text surface enclosing detected text cleanly with breathing margin
+  const hasBands = textBands.length > 0;
+  const surfX = hasBands ? Math.max(0.05, textBands[0].x - 0.03) : 0.08;
+  const surfY = hasBands ? Math.max(0.05, minBandTop - 0.035) : 0.1;
+  const surfRight = hasBands
+    ? Math.min(0.95, Math.max(...textBands.map((b) => b.x + b.width)) + 0.03)
+    : 0.92;
+  const surfBottom = hasBands ? Math.min(0.95, maxBandBot + 0.04) : 0.9;
 
-  // Confidence based on how many sides were cleanly locked + text presence
-  const lockedSides = [topLine.valid, bottomLine.valid, leftLine.valid, rightLine.valid].filter(Boolean).length;
-  const baseConf = isQuadValid ? 0.55 + lockedSides * 0.095 : 0.45;
-  const confidence = Math.min(0.98, baseConf + (textBands.length > 0 ? 0.07 : 0));
+  const textSurface = {
+    x: surfX,
+    y: surfY,
+    width: Math.max(0.5, surfRight - surfX),
+    height: Math.max(0.42, surfBottom - surfY),
+  };
+
+  const lockedSides = [topEdge.valid, bottomEdge.valid, leftEdge.valid, rightEdge.valid].filter(Boolean).length;
+  const avgSpread =
+    (topEdge.spread + bottomEdge.spread + leftEdge.spread + rightEdge.spread) / 4;
+  const skewAngleDeg = Math.min(12, avgSpread * 45);
+  const confidence = Math.min(
+    0.98,
+    (isRectValid ? 0.58 + lockedSides * 0.09 : 0.5) + (hasBands ? 0.06 : 0)
+  );
 
   return {
     corners,
-    textBands: textBands.slice(0, 12),
+    textSurface,
+    textBands: textBands.slice(0, 10),
     confidence,
     skewAngleDeg,
   };

@@ -716,10 +716,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
           className="absolute inset-0 w-full h-full object-cover"
         />
 
-        {/* PERMANENT AUTO-PROJECTION OVERLAY WITH LIGHT TRANSPARENT BLUE WASH */}
+        {/* PERMANENT ORTHOGONAL AUTO-PROJECTION OVERLAY WITH LIGHT TRANSPARENT BLUE WASH */}
         <RealtimeDocumentOverlay
           detectedArea={detectedArea}
-          modeAccentColor="#2563EB"
+          scanMode={mode}
+          modeAccentColor="#3B82F6"
           isTextDetected={isTextDetected}
           videoElement={videoRef.current}
           autoCaptureProgress={autoCaptureProgress}
@@ -799,7 +800,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         {/* MODE-SPECIFIC ALIGNMENT GUIDES */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-6">
           {mode === 'id_card' && (
-            <div className="relative w-full max-w-sm aspect-[1.586/1] rounded-2xl border-2 border-dashed border-emerald-400/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)] flex flex-col justify-between p-4">
+            <div className="relative w-full max-w-sm aspect-[1.586/1] rounded-xl border border-emerald-400/75 flex flex-col justify-between p-4">
               <div className="flex items-center justify-between">
                 <span className="px-2.5 py-1 rounded bg-emerald-500/90 text-slate-950 font-bold text-xs uppercase tracking-wider">
                   {idStep === 'front' ? '1. Front Side' : '2. Back Side'}
@@ -825,7 +826,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           )}
 
           {mode === 'passport' && (
-            <div className="relative w-full max-w-md aspect-[1.42/1] rounded-xl border-2 border-dashed border-sky-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)] flex flex-col justify-between p-4">
+            <div className="relative w-full max-w-md aspect-[1.42/1] rounded-xl border border-sky-400/75 flex flex-col justify-between p-4">
               <div className="flex justify-between items-start">
                 <div className="w-24 h-32 rounded border border-dashed border-sky-300/70 bg-sky-950/30 flex items-center justify-center text-[10px] text-sky-200">
                   Photo Zone
@@ -841,7 +842,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           )}
 
           {mode === 'receipt' && (
-            <div className="relative w-full max-w-[260px] aspect-[1/2] rounded-lg border-2 border-dashed border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)] flex flex-col justify-between p-3">
+            <div className="relative w-full max-w-[260px] aspect-[1/2] rounded-lg border border-emerald-400/75 flex flex-col justify-between p-3">
               <div className="text-center">
                 <span className="px-2 py-0.5 rounded bg-emerald-500/90 text-slate-950 font-bold text-[11px]">
                   Expense Receipt
@@ -855,7 +856,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           )}
 
           {mode === 'book' && (
-            <div className="relative w-full max-w-md aspect-[1.35/1] rounded-xl border-2 border-dashed border-violet-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)] flex justify-between p-4">
+            <div className="relative w-full max-w-md aspect-[1.35/1] rounded-xl border border-violet-400/75 flex justify-between p-4">
               <div className="flex flex-col justify-between">
                 <span className="px-2 py-0.5 rounded bg-violet-500/90 text-slate-950 font-bold text-[11px]">
                   Left Page
