@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <circle cx="256" cy="256" r="244" fill="#7C3AED" />
+  <!-- Document outline -->
+  <path
+    d="M150 108h128l54 54v202a14 14 0 0 1-14 14H150a14 14 0 0 1-14-14V122a14 14 0 0 1 14-14Z"
+    stroke="#FFFFFF"
+    stroke-width="18"
+    stroke-linejoin="round"
+  />
+  <!-- Folded top-right corner -->
+  <path
+    d="M274 108v58h58"
+    stroke="#FFFFFF"
+    stroke-width="16"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <!-- Header lines -->
+  <line x1="176" y1="146" x2="232" y2="146" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" />
+  <line x1="176" y1="174" x2="232" y2="174" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" />
+  <!-- Body text lines -->
+  <line x1="184" y1="242" x2="284" y2="242" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" />
+  <line x1="174" y1="274" x2="294" y2="274" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" />
+  <line x1="198" y1="306" x2="270" y2="306" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" />
+  <!-- Precision gear badge bottom-right -->
+  <circle cx="334" cy="346" r="64" fill="#7C3AED" />
+  <path
+    d="M334 294l9 18a36 36 0 0 1 14 6l17-9 13 13-9 17a36 36 0 0 1 6 14l18 9v18l-18 9a36 36 0 0 1-6 14l9 17-13 13-17-9a36 36 0 0 1-14 6l-9 18h-18l-9-18a36 36 0 0 1-14-6l-17 9-13-13 9-17a36 36 0 0 1-6-14l-18-9v-18l18-9a36 36 0 0 1 6-14l-9-17 13-13 17 9a36 36 0 0 1 14-6l9-18h18Z"
+    fill="#FFFFFF"
+  />
+  <circle cx="325" cy="355" r="21" fill="#7C3AED" />
+</svg>

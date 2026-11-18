@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { AppSettings, FilterPreset, ScanMode } from '../types/scanner';
 import { DetailedStorageStats } from '../utils/storage';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -210,6 +211,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className="min-h-[40px] px-3.5 py-2 rounded-lg bg-white border border-[#E6E6EB] hover:border-[#7C3AED] text-[#1C1B22] hover:text-[#7C3AED] font-medium transition-colors"
             >
               Replay Welcome Screen
+            </button>
+          )}
+        </div>
+      </section>
+
+      {/* Group 4: Android WebAPK & PWABuilder APK Export */}
+      <section className="bg-white border border-[#E6E6EB] rounded-lg p-5 space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-[#1C1B22]">Install as Android App / APK</h2>
+            <p className="text-[11px] text-[#666672] mt-0.5">
+              Offline Service Worker and Web App Manifest are active for Android WebAPK and PWABuilder.
+            </p>
+          </div>
+          <PWAInstallButton variant="settings" />
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-[#FAFAFC] border border-[#E6E6EB] space-y-2 text-[11px] text-[#666672] leading-relaxed">
+          <div className="font-semibold text-[#1C1B22]">Generate a standalone .apk file</div>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>
+              Open your published NScanner HTTPS URL directly in Android Chrome and tap{' '}
+              <strong className="text-[#1C1B22]">Install app</strong> for instant WebAPK installation.
+            </li>
+            <li>
+              To download a signed <span className="font-mono text-[#1C1B22]">.apk</span> package, enter
+              your published HTTPS URL at{' '}
+              <span className="font-mono text-[#7C3AED]">pwabuilder.com</span> or run{' '}
+              <span className="font-mono text-[#1C1B22]">
+                npx @bubblewrap/cli init --manifest {typeof window !== 'undefined' ? window.location.origin : ''}/manifest.webmanifest
+              </span>
+              .
+            </li>
+          </ol>
+
+          {typeof window !== 'undefined' && (
+            <button
+              type="button"
+              onClick={async () => {
+                await navigator.clipboard.writeText(`${window.location.origin}/manifest.webmanifest`);
+                showNote('Manifest URL copied');
+              }}
+              className="mt-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-white border border-[#E6E6EB] hover:border-[#7C3AED] text-[#1C1B22] hover:text-[#7C3AED] font-semibold inline-flex items-center gap-1.5 transition-colors"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy Manifest URL</span>
             </button>
           )}
         </div>

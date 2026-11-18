@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { AppScreen } from '../types/scanner';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavEntry {
   id: AppScreen | 'scan';
@@ -185,6 +186,11 @@ const DrawerBody: React.FC<NavigationDrawerContentProps> = ({
           </div>
         ))}
       </nav>
+
+      {/* PWA Install Footer (auto-hides when installed) */}
+      <div className="px-3 pb-3 pt-1 empty:hidden">
+        <PWAInstallButton variant="drawer" />
+      </div>
     </div>
   );
 };

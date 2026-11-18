@@ -57,6 +57,7 @@ import { AndroidNativeModal } from './components/AndroidNativeModal';
 import { PdfWorkspaceModal } from './components/PdfWorkspaceModal';
 import { SplashScreen } from './components/SplashScreen';
 import { WelcomeScreen } from './components/WelcomeScreen';
+import { OfflineIndicator } from './components/PWAInstallButton';
 
 export default function App() {
   const [showSplash, setShowSplash] = useState<boolean>(true);
@@ -950,6 +951,8 @@ export default function App() {
           onClose={() => setIsPdfWorkspaceOpen(false)}
         />
       )}
+
+      <OfflineIndicator />
     </div>
   );
 }
