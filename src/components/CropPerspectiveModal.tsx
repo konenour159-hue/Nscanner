@@ -36,7 +36,7 @@ export const CropPerspectiveModal: React.FC<CropPerspectiveModalProps> = ({
   const [textBands, setTextBands] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
   const [skewAngle, setSkewAngle] = useState<number>(0);
   const [isDetecting, setIsDetecting] = useState<boolean>(false);
-  const [showTextOverlay, setShowTextOverlay] = useState<boolean>(true);
+  const [showTextOverlay, setShowTextOverlay] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Run smart text detection
@@ -201,7 +201,7 @@ export const CropPerspectiveModal: React.FC<CropPerspectiveModalProps> = ({
 
         <div className="text-center">
           <div className="text-sm font-bold text-[#1C1B22] flex items-center justify-center gap-2">
-            <span>Perspective Projection &amp; Text Area</span>
+            <span>Paper Surface &amp; Perspective Crop</span>
             {skewAngle > 0 && (
               <span className="text-[11px] text-[#7C3AED] font-mono font-medium tabular-nums">
                 Dewarp {skewAngle.toFixed(1)}°
@@ -209,7 +209,7 @@ export const CropPerspectiveModal: React.FC<CropPerspectiveModalProps> = ({
             )}
           </div>
           <div className="text-[11px] text-[#666672]">
-            {textBands.length > 0 ? `${textBands.length} text lines locked` : 'Drag corners or click Auto-Detect'}
+            Drag paper corners to match sheet edges or click Auto-Detect
           </div>
         </div>
 
@@ -262,13 +262,12 @@ export const CropPerspectiveModal: React.FC<CropPerspectiveModalProps> = ({
               mask="url(#quad-mask)"
             />
 
-            {/* Transparent blue projection wash applied directly on the document */}
+            {/* Light translucent blue projection wash over full paper surface */}
             <polygon
               points={polygonPoints}
-              fill="rgba(37, 99, 235, 0.28)"
-              stroke="#2563EB"
-              strokeWidth="2.5"
-              strokeDasharray="6 3"
+              fill="rgba(96, 165, 250, 0.14)"
+              stroke="#60A5FA"
+              strokeWidth="2"
             />
 
             {/* 3D Perspective Projection Grid */}

@@ -49,21 +49,20 @@ export async function createThumbnail(dataUrl: string, maxDimension = 320): Prom
 }
 
 /**
- * SHADOW REMOVAL (Local Illumination Normalization):
- * Estimates the uneven paper illumination map by computing a heavily smoothed
- * local-maximum envelope on a downscaled copy, then divides out the shadow field
- * so shadowed corners brighten cleanly to match well-lit regions without blowing out dark ink.
+ * SHADOW & CREASE REMOVAL (Local Paper Illumination Normalization + Neutral White Balance):
+ * Builds a coarse upper-quartile illumination map of the document sheet so hand shadows,
+ * desk gradients, and warm indoor color casts normalize evenly toward crisp white paper
+ * while dark ink and colored stamps stay vivid.
  */
 function applyShadowRemovalInPlace(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-  strength = 0.85
+  strength = 0.88
 ) {
-  const mapW = Math.max(16, Math.min(72, Math.round(width / 16)));
-  const mapH = Math.max(16, Math.min(72, Math.round((height * mapW) / width)));
+  const mapW = Math.max(18, Math.min(84, Math.round(width / 14)));
+  const mapH = Math.max(18, Math.min(84, Math.round((height * mapW) / width)));
 
-  // 1. Build coarse local-max illumination map (captures paper brightness while ignoring thin dark text)
   const bgMapR = new Float32Array(mapW * mapH);
   const bgMapG = new Float32Array(mapW * mapH);
   const bgMapB = new Float32Array(mapW * mapH);
@@ -71,6 +70,7 @@ function applyShadowRemovalInPlace(
   const cellW = width / mapW;
   const cellH = height / mapH;
 
+  // 1. Sample upper-bright paper envelope per cell (averaging top bright samples avoids glare spikes)
   for (let my = 0; my < mapH; my++) {
     const yStart = Math.floor(my * cellH);
     const yEnd = Math.min(height, Math.ceil((my + 1) * cellH));
@@ -78,38 +78,43 @@ function applyShadowRemovalInPlace(
       const xStart = Math.floor(mx * cellW);
       const xEnd = Math.min(width, Math.ceil((mx + 1) * cellW));
 
-      // Take top-85th percentile / local bright paper sample inside cell
-      let maxLum = -1;
-      let bestR = 235;
-      let bestG = 235;
-      let bestB = 235;
       const stepY = Math.max(1, Math.floor((yEnd - yStart) / 4));
       const stepX = Math.max(1, Math.floor((xEnd - xStart) / 4));
 
+      const cellSamples: { lum: number; r: number; g: number; b: number }[] = [];
       for (let y = yStart; y < yEnd; y += stepY) {
         for (let x = xStart; x < xEnd; x += stepX) {
           const idx = (y * width + x) * 4;
-          const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-          if (lum > maxLum) {
-            maxLum = lum;
-            bestR = data[idx];
-            bestG = data[idx + 1];
-            bestB = data[idx + 2];
-          }
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          cellSamples.push({ lum, r, g, b });
         }
       }
 
+      cellSamples.sort((a, b) => b.lum - a.lum);
+      const topCount = Math.max(1, Math.min(4, Math.ceil(cellSamples.length * 0.28)));
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      for (let k = 0; k < topCount; k++) {
+        sumR += cellSamples[k].r;
+        sumG += cellSamples[k].g;
+        sumB += cellSamples[k].b;
+      }
+
       const mIdx = my * mapW + mx;
-      bgMapR[mIdx] = Math.max(70, bestR);
-      bgMapG[mIdx] = Math.max(70, bestG);
-      bgMapB[mIdx] = Math.max(70, bestB);
+      bgMapR[mIdx] = Math.max(64, sumR / topCount);
+      bgMapG[mIdx] = Math.max(64, sumG / topCount);
+      bgMapB[mIdx] = Math.max(64, sumB / topCount);
     }
   }
 
-  // 2. Smooth the background map with 2 passes of 3x3 box blur
+  // 2. Smooth the paper illumination field with 3 passes of 3x3 box blur
   const smoothChannel = (src: Float32Array) => {
     let cur = new Float32Array(src);
-    let next = new Float32Array(src.length);
+    const next = new Float32Array(src.length);
     for (let pass = 0; pass < 3; pass++) {
       for (let y = 0; y < mapH; y++) {
         for (let x = 0; x < mapW; x++) {
@@ -135,8 +140,8 @@ function applyShadowRemovalInPlace(
   const smoothG = smoothChannel(bgMapG);
   const smoothB = smoothChannel(bgMapB);
 
-  // 3. Bilinearly sample smooth background map and divide out uneven shadows
-  const targetPaper = 248;
+  // 3. Bilinearly divide out uneven illumination + subtle white-paper balance
+  const targetPaper = 252;
   for (let y = 0; y < height; y++) {
     const gy = (y / height) * (mapH - 1);
     const y0 = Math.floor(gy);
@@ -163,10 +168,16 @@ function applyShadowRemovalInPlace(
       const bgG = smoothG[i00] * w00 + smoothG[i10] * w10 + smoothG[i01] * w01 + smoothG[i11] * w11;
       const bgB = smoothB[i00] * w00 + smoothB[i10] * w10 + smoothB[i01] * w01 + smoothB[i11] * w11;
 
+      // Blend channel-specific background with luminance envelope to preserve natural photo color while fixing paper cast
+      const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+      const refR = bgR * 0.65 + bgLum * 0.35;
+      const refG = bgG * 0.65 + bgLum * 0.35;
+      const refB = bgB * 0.65 + bgLum * 0.35;
+
       const idx = (y * width + x) * 4;
-      const normR = Math.min(255, (data[idx] / bgR) * targetPaper);
-      const normG = Math.min(255, (data[idx + 1] / bgG) * targetPaper);
-      const normB = Math.min(255, (data[idx + 2] / bgB) * targetPaper);
+      const normR = Math.min(255, (data[idx] / Math.max(48, refR)) * targetPaper);
+      const normG = Math.min(255, (data[idx + 1] / Math.max(48, refG)) * targetPaper);
+      const normB = Math.min(255, (data[idx + 2] / Math.max(48, refB)) * targetPaper);
 
       data[idx] = data[idx] * (1 - strength) + normR * strength;
       data[idx + 1] = data[idx + 1] * (1 - strength) + normG * strength;
@@ -176,33 +187,41 @@ function applyShadowRemovalInPlace(
 }
 
 /**
- * Integral-image local adaptive threshold for pure crisp B&W document scans
- * (resilient against dark desk shadows).
+ * SAUVOLA-INSPIRED ADAPTIVE THRESHOLDING:
+ * Uses integral images for both local mean AND local standard deviation so crisp thin
+ * pen/printed ink stays continuous and sharp while creased or dimmed paper disappears to pure white.
  */
 function applyAdaptiveThresholdInPlace(
   data: Uint8ClampedArray,
   width: number,
   height: number
 ) {
-  const lum = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
+  const total = width * height;
+  const lum = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
     const idx = i * 4;
     lum[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
   }
 
-  // Build summed area table (integral image)
-  const sat = new Float64Array((width + 1) * (height + 1));
   const stride = width + 1;
+  const sat = new Float64Array(stride * (height + 1));
+  const satSq = new Float64Array(stride * (height + 1));
+
   for (let y = 1; y <= height; y++) {
     let rowSum = 0;
+    let rowSumSq = 0;
     for (let x = 1; x <= width; x++) {
-      rowSum += lum[(y - 1) * width + (x - 1)];
+      const v = lum[(y - 1) * width + (x - 1)];
+      rowSum += v;
+      rowSumSq += v * v;
       sat[y * stride + x] = sat[(y - 1) * stride + x] + rowSum;
+      satSq[y * stride + x] = satSq[(y - 1) * stride + x] + rowSumSq;
     }
   }
 
-  const radius = Math.max(8, Math.round(Math.min(width, height) / 28));
-  const tFactor = 0.9; // pixel is black if < 90% of local neighborhood mean
+  const radius = Math.max(10, Math.round(Math.min(width, height) / 24));
+  const k = 0.22;
+  const dynamicRange = 128;
 
   for (let y = 0; y < height; y++) {
     const y0 = Math.max(0, y - radius);
@@ -211,15 +230,42 @@ function applyAdaptiveThresholdInPlace(
       const x0 = Math.max(0, x - radius);
       const x1 = Math.min(width, x + radius + 1);
       const count = (y1 - y0) * (x1 - x0);
+
       const sum =
         sat[y1 * stride + x1] -
         sat[y0 * stride + x1] -
         sat[y1 * stride + x0] +
         sat[y0 * stride + x0];
-      const localMean = sum / count;
+      const sumSq =
+        satSq[y1 * stride + x1] -
+        satSq[y0 * stride + x1] -
+        satSq[y1 * stride + x0] +
+        satSq[y0 * stride + x0];
+
+      const mean = sum / count;
+      const variance = Math.max(0, sumSq / count - mean * mean);
+      const stdDev = Math.sqrt(variance);
+
+      // Sauvola adaptive threshold with floor guard so empty white paper has zero salt noise
+      const sauvola = mean * (1 + k * (stdDev / dynamicRange - 1));
+      const threshold = Math.min(sauvola, mean * 0.93);
 
       const pxLum = lum[y * width + x];
-      const val = pxLum < localMean * tFactor && pxLum < 210 ? 0 : 255;
+      let val: number;
+      if (stdDev < 7 && pxLum > 170) {
+        // Uniform light paper region -> pure white
+        val = 255;
+      } else {
+        // Smooth anti-aliased transition band (~14 lum levels) so typography stays crisp
+        const diff = pxLum - threshold;
+        if (diff <= -7) {
+          val = 0;
+        } else if (diff >= 7) {
+          val = 255;
+        } else {
+          val = Math.round(((diff + 7) / 14) * 255);
+        }
+      }
 
       const idx = (y * width + x) * 4;
       data[idx] = val;
@@ -231,23 +277,21 @@ function applyAdaptiveThresholdInPlace(
 
 /**
  * Core image processing pipeline:
- * Applies rotation, shadow removal (local illumination normalization),
- * filter presets (Magic Color, B&W adaptive, Grayscale, Eco),
- * and manual adjustment sliders (brightness, contrast, sharpness, warmth, saturation).
+ * Applies rotation, strong illumination/shadow removal, real-world scanner presets
+ * (Magic Color, B&W Pure Sauvola, Grayscale, Eco Light), S-curve contrast, and unsharp masking.
  */
 export async function processImage(
   dataUrl: string,
   filter: FilterPreset,
   adjustments: AdjustmentParams,
   rotation = 0,
-  targetMaxDimension?: number
+  targetMaxDimension = 2200
 ): Promise<string> {
   const img = await loadImage(dataUrl);
 
   let origWidth = img.naturalWidth || img.width;
   let origHeight = img.naturalHeight || img.height;
 
-  // Scale if requested (e.g. for real-time slider preview)
   if (targetMaxDimension && (origWidth > targetMaxDimension || origHeight > targetMaxDimension)) {
     if (origWidth > origHeight) {
       origHeight = Math.round((origHeight * targetMaxDimension) / origWidth);
@@ -258,7 +302,6 @@ export async function processImage(
     }
   }
 
-  // Handle rotation dimensions
   const isRotated90or270 = rotation % 180 !== 0;
   const canvasWidth = isRotated90or270 ? origHeight : origWidth;
   const canvasHeight = isRotated90or270 ? origWidth : origHeight;
@@ -269,7 +312,6 @@ export async function processImage(
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return dataUrl;
 
-  // Draw with rotation
   ctx.save();
   ctx.translate(canvasWidth / 2, canvasHeight / 2);
   ctx.rotate((rotation * Math.PI) / 180);
@@ -281,7 +323,6 @@ export async function processImage(
       ? adjustments.shadowRemoval
       : filter !== 'original';
 
-  // If original filter, zero adjustments, and no shadow removal requested, return early
   const isZeroAdjustments =
     adjustments.brightness === 0 &&
     adjustments.contrast === 0 &&
@@ -290,32 +331,40 @@ export async function processImage(
     adjustments.saturation === 0;
 
   if (filter === 'original' && isZeroAdjustments && !shadowRemovalEnabled) {
-    return canvas.toDataURL('image/jpeg', 0.92);
+    return canvas.toDataURL('image/jpeg', 0.93);
   }
 
   const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
   const data = imageData.data;
   const len = data.length;
 
-  // 0. LOCAL SHADOW REMOVAL (before thresholding/enhancement)
+  // 0. LOCAL PAPER ILLUMINATION & SHADOW FLATTENING
   if (shadowRemovalEnabled) {
-    const strength = filter === 'original' ? 0.65 : filter === 'bw' ? 0.9 : 0.82;
-    applyShadowRemovalInPlace(data, canvasWidth, canvasHeight, strength);
+    const customStrength =
+      adjustments.shadowStrength !== undefined
+        ? Math.max(0, Math.min(1, adjustments.shadowStrength / 100))
+        : null;
+    const defaultStrength =
+      filter === 'original'
+        ? 0.65
+        : filter === 'bw'
+        ? 0.94
+        : filter === 'magic'
+        ? 0.92
+        : 0.88;
+    applyShadowRemovalInPlace(data, canvasWidth, canvasHeight, customStrength ?? defaultStrength);
   }
 
-  // Pre-calculate adjustment factors
   const brightnessOffset = (adjustments.brightness / 100) * 128;
   const contrastFactor =
     adjustments.contrast >= 0
-      ? 1 + (adjustments.contrast / 100) * 2
+      ? 1 + (adjustments.contrast / 100) * 2.2
       : 1 + adjustments.contrast / 100;
-  const redShift = (adjustments.warmth / 50) * 25;
-  const blueShift = -(adjustments.warmth / 50) * 25;
+  const redShift = (adjustments.warmth / 50) * 26;
+  const blueShift = -(adjustments.warmth / 50) * 26;
   const satFactor = 1 + adjustments.saturation / 100;
 
-  // Adaptive B&W path uses integral image
   if (filter === 'bw') {
-    // Apply brightness/contrast before adaptive binarization if tweaked
     if (adjustments.brightness !== 0 || adjustments.contrast !== 0) {
       for (let i = 0; i < len; i += 4) {
         data[i] = Math.min(255, Math.max(0, (data[i] + brightnessOffset - 128) * contrastFactor + 128));
@@ -331,36 +380,49 @@ export async function processImage(
       let b = data[i + 2];
 
       if (filter === 'magic') {
+        // Real-world paper whitening + deep ink boost + chroma retention
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (lum > 145) {
-          const boost = Math.pow((lum - 145) / 110, 1.15) * 85;
-          r = Math.min(255, r + boost);
-          g = Math.min(255, g + boost);
-          b = Math.min(255, b + boost);
+        if (lum >= 168) {
+          // Smoothly push normalized off-white paper cleanly toward pure #FFFFFF
+          const t = (lum - 168) / 87;
+          const lift = Math.pow(t, 0.72) * (255 - lum) * 0.9;
+          r = Math.min(255, r + lift);
+          g = Math.min(255, g + lift);
+          b = Math.min(255, b + lift);
         } else {
-          const pull = (145 - lum) / 145;
-          r = Math.max(0, r * (1 - pull * 0.38));
-          g = Math.max(0, g * (1 - pull * 0.38));
-          b = Math.max(0, b * (1 - pull * 0.38));
+          // Deepen printed/handwritten ink proportionally so faint pen strokes pop
+          const inkDepth = (168 - lum) / 168;
+          const darken = 1 - Math.pow(inkDepth, 0.92) * 0.54;
+          r = Math.max(0, r * darken);
+          g = Math.max(0, g * darken);
+          b = Math.max(0, b * darken);
         }
+        // Rich color retention for signatures, stamps, IDs & highlighter ink
         const avg = (r + g + b) / 3;
-        r = Math.min(255, Math.max(0, avg + (r - avg) * 1.18));
-        g = Math.min(255, Math.max(0, avg + (g - avg) * 1.18));
-        b = Math.min(255, Math.max(0, avg + (b - avg) * 1.18));
+        r = Math.min(255, Math.max(0, avg + (r - avg) * 1.24));
+        g = Math.min(255, Math.max(0, avg + (g - avg) * 1.24));
+        b = Math.min(255, Math.max(0, avg + (b - avg) * 1.24));
       } else if (filter === 'grayscale') {
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        const adjustedLum = Math.min(255, Math.max(0, (lum - 128) * 1.15 + 138));
-        r = adjustedLum;
-        g = adjustedLum;
-        b = adjustedLum;
+        // High-legibility archival S-curve monochrome
+        let mapped: number;
+        if (lum >= 175) {
+          mapped = Math.min(255, lum + ((lum - 175) / 80) * 38);
+        } else {
+          mapped = Math.max(0, (lum - 135) * 1.38 + 135);
+        }
+        r = mapped;
+        g = mapped;
+        b = mapped;
       } else if (filter === 'eco') {
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (lum > 135) {
+        if (lum > 152) {
           r = 255;
           g = 255;
           b = 255;
         } else {
-          const ink = Math.min(255, lum * 0.78);
+          // Clean dark-charcoal ink saving printer toner while staying legible
+          const ink = Math.min(245, Math.max(32, lum * 0.72));
           r = ink;
           g = ink;
           b = ink;
@@ -397,19 +459,19 @@ export async function processImage(
     }
   }
 
-  // Sharpness convolution (Unsharp Masking)
+  // Unsharp mask edge clarity (stronger response for real-world camera softness)
   if (adjustments.sharpness > 0 || filter === 'magic') {
     const sharpnessAmount =
-      (adjustments.sharpness / 100) * 0.8 + (filter === 'magic' ? 0.22 : 0);
+      (adjustments.sharpness / 100) * 1.25 + (filter === 'magic' ? 0.34 : 0);
     applySharpness(imageData, canvasWidth, canvasHeight, sharpnessAmount);
   }
 
   ctx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL('image/jpeg', 0.92);
+  return canvas.toDataURL('image/jpeg', 0.93);
 }
 
 /**
- * 3x3 convolution kernel for unsharp mask edge enhancement
+ * 3x3 convolution kernel for unsharp mask text edge enhancement
  */
 function applySharpness(
   imageData: ImageData,
@@ -563,8 +625,15 @@ export async function perspectiveCrop(
   const leftDist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
   const rightDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
 
-  const targetW = Math.max(64, Math.round(outputWidth || Math.max(topDist, bottomDist)));
-  const targetH = Math.max(64, Math.round(outputHeight || Math.max(leftDist, rightDist)));
+  let targetW = Math.max(64, Math.round(outputWidth || Math.max(topDist, bottomDist)));
+  let targetH = Math.max(64, Math.round(outputHeight || Math.max(leftDist, rightDist)));
+
+  const maxOutDim = 2200;
+  if (!outputWidth && !outputHeight && (targetW > maxOutDim || targetH > maxOutDim)) {
+    const scale = maxOutDim / Math.max(targetW, targetH);
+    targetW = Math.max(64, Math.round(targetW * scale));
+    targetH = Math.max(64, Math.round(targetH * scale));
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
@@ -572,8 +641,24 @@ export async function perspectiveCrop(
   const ctx = canvas.getContext('2d');
   if (!ctx) return dataUrl;
 
-  const meshCols = 16;
-  const meshRows = 16;
+  // O(1) GPU-accelerated fast path for orthogonal rectangular paper bounds (~2ms vs triangle mesh)
+  const isOrthogonalRect =
+    Math.abs(corners.topLeft.x - corners.bottomLeft.x) < 0.003 &&
+    Math.abs(corners.topRight.x - corners.bottomRight.x) < 0.003 &&
+    Math.abs(corners.topLeft.y - corners.topRight.y) < 0.003 &&
+    Math.abs(corners.bottomLeft.y - corners.bottomRight.y) < 0.003;
+
+  if (isOrthogonalRect) {
+    const sx = Math.max(0, Math.min(srcW - 2, p0.x));
+    const sy = Math.max(0, Math.min(srcH - 2, p0.y));
+    const sw = Math.max(2, Math.min(srcW - sx, p1.x - p0.x));
+    const sh = Math.max(2, Math.min(srcH - sy, p3.y - p0.y));
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    return canvas.toDataURL('image/jpeg', 0.93);
+  }
+
+  const meshCols = 8;
+  const meshRows = 8;
 
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = srcW;
@@ -604,7 +689,7 @@ export async function perspectiveCrop(
     }
   }
 
-  return canvas.toDataURL('image/jpeg', 0.92);
+  return canvas.toDataURL('image/jpeg', 0.93);
 }
 
 function bilinearInterp(
@@ -798,15 +883,19 @@ export async function splitBookPages(
 
 export interface DetectedAreaResult {
   corners: QuadCorners;
+  documentSurface: { x: number; y: number; width: number; height: number };
   textSurface?: { x: number; y: number; width: number; height: number };
   textBands: { x: number; y: number; width: number; height: number }[];
   confidence: number; // 0 to 1
   skewAngleDeg: number;
+  avgLuminance?: number; // 0..255
+  sharpnessScore?: number; // 0..1
+  paperDetected?: boolean;
 }
 
 /**
  * Helper: trimmed median of sorted boundary samples so desk shadows/noise
- * do not pull a rectangle edge out of alignment.
+ * do not pull a paper boundary out of alignment.
  */
 function trimmedMedian(values: number[], fallback: number): { value: number; spread: number; valid: boolean } {
   if (values.length < 4) return { value: fallback, spread: 0, valid: false };
@@ -820,37 +909,52 @@ function trimmedMedian(values: number[], fallback: number): { value: number; spr
 }
 
 /**
- * ORTHOGONAL DOCUMENT & POLISHED TEXT-SURFACE DETECTOR:
- * 1. Estimates border background luminance & color.
- * 2. Computes Sobel gradient + paper-vs-background contrast map.
- * 3. Locates clean Top/Bottom/Left/Right paper edges via trimmed median rays
- *    and locks them to a true 90° rectangle (never an oblique polygon).
- * 4. Computes a clean rectangular `textSurface` bounding region around detected
- *    text strokes plus aligned text-line bands strictly inside the rectangle.
+ * FULL PAPER-SECTION ORTHOGONAL DOCUMENT DETECTOR:
+ * 1. Samples outer desk surround vs inner sheet paper envelope (upper-quartile brightness
+ *    so dark ink inside the document never pulls paper color down).
+ * 2. Scans outer-inward along 24 rays per side to lock strictly onto the OUTER boundary
+ *    of the physical paper sheet / card — NEVER collapsing inward around text paragraphs.
+ * 3. Returns a crisp 90-degree orthogonal rectangle (`corners` & `documentSurface`) plus
+ *    frame lighting & sharpness telemetry for real-world capture guidance.
  */
+// Reusable offscreen analysis buffers to keep real-time live edge tracking allocation-free (~5-8ms/frame)
+const ANALYSIS_SIZE = 200;
+let cachedAnalysisCanvas: HTMLCanvasElement | null = null;
+let cachedAnalysisCtx: CanvasRenderingContext2D | null = null;
+const cachedGrayBuf = new Float32Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
+const cachedEdgeBuf = new Float32Array(ANALYSIS_SIZE * ANALYSIS_SIZE);
+const cachedRowEnergyBuf = new Float32Array(ANALYSIS_SIZE);
+
 export async function detectDocumentAndTextCorners(
   source: string | HTMLCanvasElement | HTMLVideoElement
 ): Promise<DetectedAreaResult> {
-  const analysisW = 220;
-  const analysisH = 220;
+  const analysisW = ANALYSIS_SIZE;
+  const analysisH = ANALYSIS_SIZE;
 
   const fallbackResult: DetectedAreaResult = {
     corners: {
-      topLeft: { x: 0.1, y: 0.1 },
-      topRight: { x: 0.9, y: 0.1 },
-      bottomRight: { x: 0.9, y: 0.9 },
-      bottomLeft: { x: 0.1, y: 0.9 },
+      topLeft: { x: 0.08, y: 0.08 },
+      topRight: { x: 0.92, y: 0.08 },
+      bottomRight: { x: 0.92, y: 0.92 },
+      bottomLeft: { x: 0.08, y: 0.92 },
     },
-    textSurface: { x: 0.08, y: 0.1, width: 0.84, height: 0.8 },
+    documentSurface: { x: 0.08, y: 0.08, width: 0.84, height: 0.84 },
+    textSurface: { x: 0.08, y: 0.08, width: 0.84, height: 0.84 },
     textBands: [],
     confidence: 0.65,
     skewAngleDeg: 0,
+    avgLuminance: 140,
+    sharpnessScore: 0.75,
+    paperDetected: false,
   };
 
-  const canvas = document.createElement('canvas');
-  canvas.width = analysisW;
-  canvas.height = analysisH;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!cachedAnalysisCanvas) {
+    cachedAnalysisCanvas = document.createElement('canvas');
+    cachedAnalysisCanvas.width = analysisW;
+    cachedAnalysisCanvas.height = analysisH;
+    cachedAnalysisCtx = cachedAnalysisCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  const ctx = cachedAnalysisCtx;
   if (!ctx) return fallbackResult;
 
   if (typeof source === 'string') {
@@ -864,20 +968,24 @@ export async function detectDocumentAndTextCorners(
   const data = imgData.data;
   const totalPx = analysisW * analysisH;
 
-  const gray = new Float32Array(totalPx);
+  const gray = cachedGrayBuf;
+  let lumSum = 0;
   for (let i = 0; i < totalPx; i++) {
     const idx = i * 4;
-    gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    const g = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    gray[i] = g;
+    lumSum += g;
   }
+  const avgLuminance = lumSum / totalPx;
 
-  // Sample outer border background RGB + luminance
+  // 1. Sample outer 8px border (surrounding desk/surface)
   let borderR = 0;
   let borderG = 0;
   let borderB = 0;
   let borderCount = 0;
-  for (let y = 0; y < analysisH; y += 4) {
-    for (let x = 0; x < analysisW; x += 4) {
-      if (x < 10 || x >= analysisW - 10 || y < 10 || y >= analysisH - 10) {
+  for (let y = 0; y < analysisH; y += 3) {
+    for (let x = 0; x < analysisW; x += 3) {
+      if (x < 9 || x >= analysisW - 9 || y < 9 || y >= analysisH - 9) {
         const idx = (y * analysisW + x) * 4;
         borderR += data[idx];
         borderG += data[idx + 1];
@@ -891,10 +999,43 @@ export async function detectDocumentAndTextCorners(
   const bgB = borderB / Math.max(1, borderCount);
   const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
 
-  const edgeScore = new Float32Array(totalPx);
-  const textEnergyRows = new Float32Array(analysisH);
+  // 2. Sample inner central box (30%-70%) to estimate actual paper surface RGB & lum (top 40% brightest pixels ignore ink)
+  const centerSamples: { lum: number; r: number; g: number; b: number }[] = [];
+  for (let y = Math.round(analysisH * 0.3); y <= Math.round(analysisH * 0.7); y += 4) {
+    for (let x = Math.round(analysisW * 0.3); x <= Math.round(analysisW * 0.7); x += 4) {
+      const idx = y * analysisW + x;
+      const pIdx = idx * 4;
+      centerSamples.push({ lum: gray[idx], r: data[pIdx], g: data[pIdx + 1], b: data[pIdx + 2] });
+    }
+  }
+  centerSamples.sort((a, b) => b.lum - a.lum);
+  const paperSliceEnd = Math.max(4, Math.floor(centerSamples.length * 0.4));
+  let paperR = 0;
+  let paperG = 0;
+  let paperB = 0;
+  for (let i = 0; i < paperSliceEnd; i++) {
+    paperR += centerSamples[i].r;
+    paperG += centerSamples[i].g;
+    paperB += centerSamples[i].b;
+  }
+  paperR /= paperSliceEnd;
+  paperG /= paperSliceEnd;
+  paperB /= paperSliceEnd;
+  const paperLum = 0.299 * paperR + 0.587 * paperG + 0.114 * paperB;
+
+  const deskPaperColorDiff =
+    Math.abs(paperR - bgR) + Math.abs(paperG - bgG) + Math.abs(paperB - bgB);
+  const deskPaperLumDiff = Math.abs(paperLum - bgLum);
+  const hasDistinctDesk = deskPaperLumDiff > 16 || deskPaperColorDiff > 32;
+
+  // 3. Sobel edge score + sharpness Laplacian check + text energy detection
+  const edgeScore = cachedEdgeBuf;
+  const textEnergyRows = cachedRowEnergyBuf;
+  textEnergyRows.fill(0);
   let minTextX = analysisW;
   let maxTextX = 0;
+  let edgeEnergyTotal = 0;
+  let edgePxCount = 0;
 
   for (let y = 2; y < analysisH - 2; y++) {
     for (let x = 2; x < analysisW - 2; x++) {
@@ -922,7 +1063,12 @@ export async function detectDocumentAndTextCorners(
         Math.abs(data[pxIdx + 1] - bgG) +
         Math.abs(data[pxIdx + 2] - bgB);
 
-      edgeScore[idx] = mag * 0.7 + colorDist * 0.35;
+      edgeScore[idx] = mag * 0.68 + colorDist * 0.35;
+
+      if (x % 2 === 0 && y % 2 === 0) {
+        edgeEnergyTotal += mag;
+        edgePxCount++;
+      }
 
       const lum = gray[idx];
       if (
@@ -930,7 +1076,7 @@ export async function detectDocumentAndTextCorners(
         x < analysisW - 16 &&
         y > 16 &&
         y < analysisH - 16 &&
-        Math.abs(gx) > 34 &&
+        Math.abs(gx) > 36 &&
         lum < 210
       ) {
         textEnergyRows[y] += Math.abs(gx);
@@ -940,78 +1086,115 @@ export async function detectDocumentAndTextCorners(
     }
   }
 
+  const meanEdge = edgeEnergyTotal / Math.max(1, edgePxCount);
+  const sharpnessScore = Math.min(1, Math.max(0.15, meanEdge / 58));
+
+  // Helper: check if pixel resembles detected paper more than outer desk surface
+  const isPaperPixel = (x: number, y: number): boolean => {
+    const pxIdx = (y * analysisW + x) * 4;
+    const drP = Math.abs(data[pxIdx] - paperR);
+    const dgP = Math.abs(data[pxIdx + 1] - paperG);
+    const dbP = Math.abs(data[pxIdx + 2] - paperB);
+    const distPaper = drP + dgP + dbP;
+
+    const drB = Math.abs(data[pxIdx] - bgR);
+    const dgB = Math.abs(data[pxIdx + 1] - bgG);
+    const dbB = Math.abs(data[pxIdx + 2] - bgB);
+    const distDesk = drB + dgB + dbB;
+
+    return distPaper * 1.15 < distDesk && gray[y * analysisW + x] > Math.min(bgLum, paperLum) * 0.72;
+  };
+
+  // 4. Outer-inward paper boundary scan along 24 rays per side
+  // Locks onto the PHYSICAL PAPER SECTION boundary, never shrinking into inner text lines
   const topSamples: number[] = [];
   const bottomSamples: number[] = [];
   const leftSamples: number[] = [];
   const rightSamples: number[] = [];
 
-  const rayCount = 20;
-  const edgeThreshold = 72;
+  const rayCount = 24;
+  const edgeThreshold = hasDistinctDesk ? 46 : 78;
 
   for (let i = 0; i < rayCount; i++) {
-    const frac = 0.2 + (i / (rayCount - 1)) * 0.6;
+    const frac = 0.18 + (i / (rayCount - 1)) * 0.64;
     const rx = Math.round(frac * analysisW);
     const ry = Math.round(frac * analysisH);
 
-    for (let y = 6; y < Math.round(analysisH * 0.44); y++) {
+    // Top paper edge (outer -> inward up to 34% depth so inner paragraphs aren't mistaken as paper edge)
+    for (let y = 4; y < Math.round(analysisH * 0.34); y++) {
       const s = edgeScore[y * analysisW + rx];
-      const nextBright = gray[Math.min(analysisH - 1, y + 4) * analysisW + rx];
-      if (s > edgeThreshold && (nextBright > bgLum + 18 || s > 140)) {
+      const lookAhead = Math.min(analysisH - 5, y + 6);
+      const paperMatch = hasDistinctDesk
+        ? isPaperPixel(rx, y + 3) && isPaperPixel(rx, lookAhead)
+        : s > edgeThreshold && gray[lookAhead * analysisW + rx] > bgLum + 14;
+      if ((s > edgeThreshold && paperMatch) || (hasDistinctDesk && isPaperPixel(rx, y) && isPaperPixel(rx, lookAhead))) {
         topSamples.push(y / analysisH);
         break;
       }
     }
 
-    for (let y = analysisH - 7; y > Math.round(analysisH * 0.56); y--) {
+    // Bottom paper edge
+    for (let y = analysisH - 5; y > Math.round(analysisH * 0.66); y--) {
       const s = edgeScore[y * analysisW + rx];
-      const prevBright = gray[Math.max(0, y - 4) * analysisW + rx];
-      if (s > edgeThreshold && (prevBright > bgLum + 18 || s > 140)) {
+      const lookAhead = Math.max(4, y - 6);
+      const paperMatch = hasDistinctDesk
+        ? isPaperPixel(rx, y - 3) && isPaperPixel(rx, lookAhead)
+        : s > edgeThreshold && gray[lookAhead * analysisW + rx] > bgLum + 14;
+      if ((s > edgeThreshold && paperMatch) || (hasDistinctDesk && isPaperPixel(rx, y) && isPaperPixel(rx, lookAhead))) {
         bottomSamples.push(y / analysisH);
         break;
       }
     }
 
-    for (let x = 6; x < Math.round(analysisW * 0.44); x++) {
+    // Left paper edge
+    for (let x = 4; x < Math.round(analysisW * 0.34); x++) {
       const s = edgeScore[ry * analysisW + x];
-      const nextBright = gray[ry * analysisW + Math.min(analysisW - 1, x + 4)];
-      if (s > edgeThreshold && (nextBright > bgLum + 18 || s > 140)) {
+      const lookAhead = Math.min(analysisW - 5, x + 6);
+      const paperMatch = hasDistinctDesk
+        ? isPaperPixel(x + 3, ry) && isPaperPixel(lookAhead, ry)
+        : s > edgeThreshold && gray[ry * analysisW + lookAhead] > bgLum + 14;
+      if ((s > edgeThreshold && paperMatch) || (hasDistinctDesk && isPaperPixel(x, ry) && isPaperPixel(lookAhead, ry))) {
         leftSamples.push(x / analysisW);
         break;
       }
     }
 
-    for (let x = analysisW - 7; x > Math.round(analysisW * 0.56); x--) {
+    // Right paper edge
+    for (let x = analysisW - 5; x > Math.round(analysisW * 0.66); x--) {
       const s = edgeScore[ry * analysisW + x];
-      const prevBright = gray[ry * analysisW + Math.max(0, x - 4)];
-      if (s > edgeThreshold && (prevBright > bgLum + 18 || s > 140)) {
+      const lookAhead = Math.max(4, x - 6);
+      const paperMatch = hasDistinctDesk
+        ? isPaperPixel(x - 3, ry) && isPaperPixel(lookAhead, ry)
+        : s > edgeThreshold && gray[ry * analysisW + lookAhead] > bgLum + 14;
+      if ((s > edgeThreshold && paperMatch) || (hasDistinctDesk && isPaperPixel(x, ry) && isPaperPixel(lookAhead, ry))) {
         rightSamples.push(x / analysisW);
         break;
       }
     }
   }
 
-  const topEdge = trimmedMedian(topSamples, 0.1);
-  const bottomEdge = trimmedMedian(bottomSamples, 0.9);
-  const leftEdge = trimmedMedian(leftSamples, 0.1);
-  const rightEdge = trimmedMedian(rightSamples, 0.9);
+  const topEdge = trimmedMedian(topSamples, 0.08);
+  const bottomEdge = trimmedMedian(bottomSamples, 0.92);
+  const leftEdge = trimmedMedian(leftSamples, 0.08);
+  const rightEdge = trimmedMedian(rightSamples, 0.92);
 
-  let left = Math.max(0.05, Math.min(0.32, leftEdge.value));
-  let right = Math.min(0.95, Math.max(0.68, rightEdge.value));
-  let top = Math.max(0.05, Math.min(0.32, topEdge.value));
-  let bottom = Math.min(0.95, Math.max(0.68, bottomEdge.value));
+  let left = Math.max(0.04, Math.min(0.28, leftEdge.value));
+  let right = Math.min(0.96, Math.max(0.72, rightEdge.value));
+  let top = Math.max(0.04, Math.min(0.28, topEdge.value));
+  let bottom = Math.min(0.96, Math.max(0.72, bottomEdge.value));
 
   const rectW = right - left;
   const rectH = bottom - top;
-  const isRectValid = rectW > 0.36 && rectH > 0.36;
+  const isRectValid = rectW > 0.42 && rectH > 0.42;
 
   if (!isRectValid) {
-    left = 0.1;
-    top = 0.1;
-    right = 0.9;
-    bottom = 0.9;
+    left = 0.08;
+    top = 0.08;
+    right = 0.92;
+    bottom = 0.92;
   }
 
-  // Strictly orthogonal 90° rectangle corners (never an oblique polygon)
+  // Strictly orthogonal 90-degree corners enclosing the full paper document surface
   const corners: QuadCorners = {
     topLeft: { x: left, y: top },
     topRight: { x: right, y: top },
@@ -1019,19 +1202,23 @@ export async function detectDocumentAndTextCorners(
     bottomLeft: { x: left, y: bottom },
   };
 
-  // Detect strictly rectangular text-line bands inside the locked orthogonal frame
+  const documentSurface = {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+
+  // Optional internal text-line coordinates (used only if user toggles text inspection)
   const textBands: { x: number; y: number; width: number; height: number }[] = [];
   let inBand = false;
   let bandStartY = 0;
 
-  const boxW = Math.max(0.3, right - left);
-  const boxH = Math.max(0.3, bottom - top);
+  const boxW = Math.max(0.35, right - left);
+  const boxH = Math.max(0.35, bottom - top);
 
   const bandMinX = minTextX < analysisW ? Math.max(left + 0.03, minTextX / analysisW) : left + boxW * 0.08;
   const bandMaxX = maxTextX > 0 ? Math.min(right - 0.03, maxTextX / analysisW) : right - boxW * 0.08;
-
-  let minBandTop = 1;
-  let maxBandBot = 0;
 
   for (let y = 12; y < analysisH - 12; y++) {
     const energy = textEnergyRows[y];
@@ -1048,29 +1235,10 @@ export async function detectDocumentAndTextCorners(
         const relY = Math.max(0.05, Math.min(0.9, (bandStartY / analysisH - top) / boxH));
         const relW = Math.max(0.35, Math.min(0.88 - relX, (bandMaxX - bandMinX) / boxW));
         const relH = Math.max(0.02, Math.min(0.08, bandH / analysisH / boxH));
-
         textBands.push({ x: relX, y: relY, width: relW, height: relH });
-        if (relY < minBandTop) minBandTop = relY;
-        if (relY + relH > maxBandBot) maxBandBot = relY + relH;
       }
     }
   }
-
-  // Polished rectangular text surface enclosing detected text cleanly with breathing margin
-  const hasBands = textBands.length > 0;
-  const surfX = hasBands ? Math.max(0.05, textBands[0].x - 0.03) : 0.08;
-  const surfY = hasBands ? Math.max(0.05, minBandTop - 0.035) : 0.1;
-  const surfRight = hasBands
-    ? Math.min(0.95, Math.max(...textBands.map((b) => b.x + b.width)) + 0.03)
-    : 0.92;
-  const surfBottom = hasBands ? Math.min(0.95, maxBandBot + 0.04) : 0.9;
-
-  const textSurface = {
-    x: surfX,
-    y: surfY,
-    width: Math.max(0.5, surfRight - surfX),
-    height: Math.max(0.42, surfBottom - surfY),
-  };
 
   const lockedSides = [topEdge.valid, bottomEdge.valid, leftEdge.valid, rightEdge.valid].filter(Boolean).length;
   const avgSpread =
@@ -1078,14 +1246,18 @@ export async function detectDocumentAndTextCorners(
   const skewAngleDeg = Math.min(12, avgSpread * 45);
   const confidence = Math.min(
     0.98,
-    (isRectValid ? 0.58 + lockedSides * 0.09 : 0.5) + (hasBands ? 0.06 : 0)
+    (isRectValid ? 0.56 + lockedSides * 0.09 : 0.5) + (hasDistinctDesk ? 0.08 : 0)
   );
 
   return {
     corners,
-    textSurface,
+    documentSurface,
+    textSurface: { x: 0, y: 0, width: 1, height: 1 },
     textBands: textBands.slice(0, 10),
     confidence,
     skewAngleDeg,
+    avgLuminance,
+    sharpnessScore,
+    paperDetected: hasDistinctDesk && lockedSides >= 2,
   };
 }

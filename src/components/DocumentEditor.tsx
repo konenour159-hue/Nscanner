@@ -105,27 +105,50 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     setTimeout(() => setToastMessage(null), 2200);
   }
 
-  // Record lastOpenedAt once on mount
+  const processedSigByPageRef = useRef<Record<string, string>>({});
+
+  // Record lastOpenedAt once on mount & index pre-processed signatures for all pages
   useEffect(() => {
+    const map: Record<string, string> = {};
+    for (const p of initialDoc.pages) {
+      if (p.processedDataUrl) {
+        map[p.id] = JSON.stringify([p.filter, p.rotation, p.adjustments]);
+      }
+    }
+    processedSigByPageRef.current = map;
     onUpdateDocument({ ...initialDoc, lastOpenedAt: Date.now() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialDoc.id]);
 
-  // Process image whenever active page filter, rotation, or adjustments change
+  // Process image only when filter, rotation, or adjustments actually change (fast 960px preview -> crisp 2200px commit)
   useEffect(() => {
+    if (!activePage) return;
+    const sig = JSON.stringify([
+      activePage.filter,
+      activePage.rotation,
+      activePage.adjustments,
+    ]);
+    if (processedSigByPageRef.current[activePage.id] === sig && activePage.processedDataUrl) {
+      return;
+    }
+
     let isCancelled = false;
 
-    async function updateActivePagePreview() {
+    async function updateActivePagePreview(maxDim: number, isFinal: boolean) {
       if (!activePage) return;
       try {
         const processed = await processImage(
           activePage.originalDataUrl,
           activePage.filter,
           activePage.adjustments,
-          activePage.rotation
+          activePage.rotation,
+          maxDim
         );
         if (isCancelled) return;
-        const thumb = await createThumbnail(processed);
+        const thumb = isFinal ? await createThumbnail(processed) : activePage.thumbnailUrl;
+        if (isFinal) {
+          processedSigByPageRef.current[activePage.id] = sig;
+        }
 
         setDoc((prev) => {
           const updatedPages = [...prev.pages];
@@ -137,7 +160,9 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
             };
           }
           const updatedDoc = { ...prev, pages: updatedPages, updatedAt: Date.now() };
-          onUpdateDocument(updatedDoc);
+          if (isFinal) {
+            onUpdateDocument(updatedDoc);
+          }
           return updatedDoc;
         });
       } catch (err) {
@@ -145,12 +170,15 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
       }
     }
 
-    const timeout = setTimeout(updateActivePagePreview, 65);
+    const fastTimeout = setTimeout(() => updateActivePagePreview(960, false), 25);
+    const fullTimeout = setTimeout(() => updateActivePagePreview(2200, true), 260);
     return () => {
       isCancelled = true;
-      clearTimeout(timeout);
+      clearTimeout(fastTimeout);
+      clearTimeout(fullTimeout);
     };
   }, [
+    activePage?.id,
     activePage?.filter,
     activePage?.rotation,
     activePage?.adjustments?.brightness,
@@ -159,6 +187,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     activePage?.adjustments?.warmth,
     activePage?.adjustments?.saturation,
     activePage?.adjustments?.shadowRemoval,
+    activePage?.adjustments?.shadowStrength,
     activePageIndex,
   ]);
 
@@ -323,6 +352,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
         warmth: 0,
         saturation: 0,
         shadowRemoval: true,
+        shadowStrength: 88,
       },
     };
     setDoc({ ...doc, pages: updatedPages });
@@ -924,10 +954,10 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
           </div>
         )}
 
-        {/* TAB 2: FINE-TUNING + SHADOW REMOVAL */}
+        {/* TAB 2: FINE-TUNING + SHADOW & CREASE FLATTENING */}
         {activeTab === 'adjust' && (
-          <div className="max-w-2xl mx-auto space-y-2.5 py-1">
-            <div className="flex items-center justify-between text-xs">
+          <div className="max-w-3xl mx-auto space-y-2.5 py-1">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <label className="flex items-center gap-2 text-[#1C1B22] font-medium cursor-pointer">
                 <input
                   type="checkbox"
@@ -935,21 +965,42 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                   onChange={(e) => handleAdjustmentChange('shadowRemoval', e.target.checked)}
                   className="w-4 h-4 rounded accent-[#7C3AED]"
                 />
-                <span>Automatic Shadow Removal (Local Illumination Normalization)</span>
+                <span>Shadow &amp; Crease Flattening (Illumination Normalization)</span>
               </label>
-              <button
-                onClick={handleResetSliders}
-                className="text-[#7C3AED] hover:underline text-[11px] font-medium"
-              >
-                Reset
-              </button>
+
+              <div className="flex items-center gap-3">
+                {(activePage?.adjustments?.shadowRemoval ?? activePage?.filter !== 'original') && (
+                  <label className="flex items-center gap-2 text-[11px] text-[#666672]">
+                    <span>Strength</span>
+                    <input
+                      type="range"
+                      min={20}
+                      max={100}
+                      value={Number(activePage?.adjustments?.shadowStrength ?? 88)}
+                      onChange={(e) => handleAdjustmentChange('shadowStrength', Number(e.target.value))}
+                      className="w-20 accent-[#7C3AED]"
+                    />
+                    <span className="font-mono tabular-nums w-7 text-right">
+                      {Number(activePage?.adjustments?.shadowStrength ?? 88)}%
+                    </span>
+                  </label>
+                )}
+
+                <button
+                  onClick={handleResetSliders}
+                  className="text-[#7C3AED] hover:underline text-[11px] font-medium"
+                >
+                  Reset
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
               {[
                 { key: 'brightness', label: 'Brightness', min: -100, max: 100 },
                 { key: 'contrast', label: 'Contrast', min: -100, max: 100 },
                 { key: 'sharpness', label: 'Sharpness', min: 0, max: 100 },
+                { key: 'saturation', label: 'Color Boost', min: -100, max: 100 },
                 { key: 'warmth', label: 'Warmth', min: -50, max: 50 },
               ].map((sl) => {
                 const val = Number(activePage?.adjustments?.[sl.key as keyof AdjustmentParams] ?? 0);

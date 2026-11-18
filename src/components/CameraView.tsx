@@ -14,6 +14,11 @@ import {
   AlertCircle,
   Trash2,
   Timer,
+  Grid3x3,
+  SlidersHorizontal,
+  Sun,
+  Focus,
+  Maximize2,
 } from 'lucide-react';
 import { ScanMode, PageItem, QuadCorners, FilterPreset, AdjustmentParams } from '../types/scanner';
 import {
@@ -35,22 +40,41 @@ interface CameraViewProps {
   onClose: () => void;
 }
 
+type ShadowLevel = 'off' | 'balanced' | 'strong';
+type FramingMode = 'auto_paper' | 'full_frame';
+type ClarityLevel = 'standard' | 'ultra';
+type ResolutionMode = 'hd' | 'ultra';
+
 export const CameraView: React.FC<CameraViewProps> = ({
-  initialMode = 'id_card',
+  initialMode = 'document',
   targetFolderId: _targetFolderId,
   onSaveDocument,
   onClose,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const viewfinderRef = useRef<HTMLDivElement | null>(null);
 
   const [mode, setMode] = useState<ScanMode>(initialMode);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [hasTorch, setHasTorch] = useState<boolean>(false);
   const [torchOn, setTorchOn] = useState<boolean>(false);
+  const [screenFlashOn, setScreenFlashOn] = useState<boolean>(false);
   const [permissionState, setPermissionState] = useState<'granted' | 'needs_prompt' | 'denied'>('granted');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isShutterFlashing, setIsShutterFlashing] = useState<boolean>(false);
+
+  // Real-world Pro Scanner Options
+  const [captureFilter, setCaptureFilter] = useState<FilterPreset>(() => getAppSettings().defaultFilter);
+  const [shadowLevel, setShadowLevel] = useState<ShadowLevel>('strong');
+  const [clarityLevel, setClarityLevel] = useState<ClarityLevel>('ultra');
+  const [framingMode, setFramingMode] = useState<FramingMode>('auto_paper');
+  const [showGrid, setShowGrid] = useState<boolean>(false);
+  const [timerSeconds, setTimerSeconds] = useState<0 | 2 | 5>(0);
+  const [countdownLeft, setCountdownLeft] = useState<number | null>(null);
+  const [resolutionMode, setResolutionMode] = useState<ResolutionMode>('hd');
+  const [isOptionsOpen, setIsOptionsOpen] = useState<boolean>(false);
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
 
   // ID Card Recto-Verso state
   const [idStep, setIdStep] = useState<'front' | 'back'>('front');
@@ -61,7 +85,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [isBatchTrayOpen, setIsBatchTrayOpen] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
-  // AUTO-PROJECTION: Permanently ON without user toggling
+  // AUTO-PROJECTION: Permanently ON spanning full paper surface
   const autoProjectEnabled = true;
 
   // AUTO-CAPTURE: Steadiness lock detector (initialized from NScanner Settings)
@@ -73,44 +97,58 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const [detectedArea, setDetectedArea] = useState<DetectedAreaResult | null>({
     corners: {
-      topLeft: { x: 0.1, y: 0.12 },
-      topRight: { x: 0.9, y: 0.12 },
-      bottomRight: { x: 0.9, y: 0.88 },
-      bottomLeft: { x: 0.1, y: 0.88 },
+      topLeft: { x: 0.08, y: 0.08 },
+      topRight: { x: 0.92, y: 0.08 },
+      bottomRight: { x: 0.92, y: 0.92 },
+      bottomLeft: { x: 0.08, y: 0.92 },
     },
-    textBands: [
-      { x: 0.16, y: 0.22, width: 0.68, height: 0.035 },
-      { x: 0.16, y: 0.29, width: 0.64, height: 0.035 },
-      { x: 0.16, y: 0.36, width: 0.7, height: 0.035 },
-      { x: 0.16, y: 0.43, width: 0.55, height: 0.035 },
-      { x: 0.16, y: 0.52, width: 0.62, height: 0.035 },
-    ],
+    documentSurface: { x: 0.08, y: 0.08, width: 0.84, height: 0.84 },
+    textBands: [],
     confidence: 0.88,
-    skewAngleDeg: 1.5,
+    skewAngleDeg: 0,
+    avgLuminance: 140,
+    sharpnessScore: 0.8,
+    paperDetected: false,
   });
-  const [isTextDetected, setIsTextDetected] = useState<boolean>(true);
   const smoothedCornersRef = useRef<QuadCorners | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const shutterFnRef = useRef<() => void>(() => {});
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Smart Edge Detection + Auto-Capture Steadiness Lock Loop
+  // Adjust filter defaults automatically when switching into receipt mode if user hadn't customized
+  useEffect(() => {
+    if (mode === 'receipt' && captureFilter === 'magic') {
+      // keep user choice if they selected it manually, otherwise receipt B&W works nicely cleanly via filter strip
+    }
+  }, [mode, captureFilter]);
+
+  // Smart Full-Paper Edge Detection + Auto-Capture Steadiness Lock Loop (~12 FPS)
   useEffect(() => {
     let isMounted = true;
     let timerId: ReturnType<typeof setTimeout> | null = null;
-    const intervalMs = 240;
+    const intervalMs = 85;
+    let lastTickAt = Date.now();
 
     async function detectFrame() {
       if (videoRef.current && videoRef.current.readyState >= 2) {
         try {
           const result = await detectDocumentAndTextCorners(videoRef.current);
+          const now = Date.now();
+          const dt = Math.min(350, Math.max(20, now - lastTickAt));
+          lastTickAt = now;
+
           if (isMounted && result) {
             setDetectedArea(result);
-            setIsTextDetected(result.textBands.length > 0);
 
-            // Auto-capture steadiness calculation
-            const now = Date.now();
-            if (autoCaptureEnabled && !isProcessing && now > cooldownUntilRef.current) {
+            if (
+              autoCaptureEnabled &&
+              !isProcessing &&
+              countdownLeft === null &&
+              !isOptionsOpen &&
+              now > cooldownUntilRef.current
+            ) {
               const prev = prevCornersRef.current;
               const curr = result.corners;
               let maxDelta = 1;
@@ -127,9 +165,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 );
               }
 
-              if (result.confidence >= 0.72 && maxDelta < 0.025) {
-                steadyMsRef.current += intervalMs;
-                const progress = Math.min(1, steadyMsRef.current / 1200);
+              if (result.confidence >= 0.7 && maxDelta < 0.022) {
+                steadyMsRef.current += dt;
+                const progress = Math.min(1, steadyMsRef.current / 1050);
                 setAutoCaptureProgress(progress);
 
                 if (progress >= 1) {
@@ -139,8 +177,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
                   shutterFnRef.current();
                 }
               } else {
-                steadyMsRef.current = Math.max(0, steadyMsRef.current - intervalMs * 1.5);
-                setAutoCaptureProgress(Math.min(1, steadyMsRef.current / 1200));
+                steadyMsRef.current = Math.max(0, steadyMsRef.current - dt * 1.4);
+                setAutoCaptureProgress(Math.min(1, steadyMsRef.current / 1050));
               }
               prevCornersRef.current = curr;
             } else {
@@ -158,64 +196,83 @@ export const CameraView: React.FC<CameraViewProps> = ({
       }
     }
 
-    timerId = setTimeout(detectFrame, 500);
+    timerId = setTimeout(detectFrame, 300);
     return () => {
       isMounted = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [autoCaptureEnabled, isProcessing]);
+  }, [autoCaptureEnabled, isProcessing, countdownLeft, isOptionsOpen]);
 
-  const startCameraStream = React.useCallback(async (isMountedCheck?: () => boolean) => {
-    stopCamera();
-    setCameraError(null);
+  const startCameraStream = React.useCallback(
+    async (isMountedCheck?: () => boolean) => {
+      stopCamera();
+      setCameraError(null);
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setPermissionState('denied');
-      setCameraError(
-        'Camera capture is unavailable in this browser context. You can upload photos or load a demo document.'
-      );
-      return;
-    }
-
-    try {
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: facingMode },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (isMountedCheck && !isMountedCheck()) {
-        stream.getTracks().forEach((t) => t.stop());
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setPermissionState('denied');
+        setCameraError(
+          'Camera capture is unavailable in this browser context. You can upload photos or load a demo document.'
+        );
         return;
       }
 
-      setPermissionState('granted');
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      try {
+        const targetW = resolutionMode === 'ultra' ? 3840 : 1920;
+        const targetH = resolutionMode === 'ultra' ? 2160 : 1080;
+
+        const constraints: MediaStreamConstraints = {
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: targetW },
+            height: { ideal: targetH },
+          },
+          audio: false,
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (isMountedCheck && !isMountedCheck()) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        setPermissionState('granted');
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+
+        const track = stream.getVideoTracks()[0];
+        const capabilities = (track.getCapabilities ? track.getCapabilities() : {}) as {
+          torch?: boolean;
+          focusMode?: string[];
+        };
+        setHasTorch(Boolean(capabilities?.torch));
+
+        // Request continuous autofocus when hardware supports it
+        if (capabilities?.focusMode?.includes('continuous')) {
+          try {
+            await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+              advanced: [{ focusMode: 'continuous' }],
+            });
+          } catch {
+            // ignore unsupported continuous focus
+          }
+        }
+      } catch (err) {
+        const isDenied =
+          err instanceof DOMException &&
+          (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
+        setPermissionState('denied');
+        setCameraError(
+          isDenied
+            ? 'Camera permission was declined. Allow camera access in browser settings or upload images below.'
+            : 'Camera hardware is unavailable right now. You can upload images or load a demo document.'
+        );
       }
+    },
+    [facingMode, resolutionMode]
+  );
 
-      const track = stream.getVideoTracks()[0];
-      const capabilities = (track.getCapabilities ? track.getCapabilities() : {}) as { torch?: boolean };
-      setHasTorch(Boolean(capabilities?.torch));
-    } catch (err) {
-      const isDenied =
-        err instanceof DOMException &&
-        (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
-      setPermissionState('denied');
-      setCameraError(
-        isDenied
-          ? 'Camera permission was declined. Allow camera access in browser settings or upload images below.'
-          : 'Camera hardware is unavailable right now. You can upload images or load a demo document.'
-      );
-    }
-  }, [facingMode]);
-
-  // Contextual camera initialization (only runs when user opens CameraView)
   useEffect(() => {
     let isMounted = true;
 
@@ -237,7 +294,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           }
         }
       } catch {
-        // Permissions API unsupported for camera in this browser — request stream directly on scan start
+        // Permissions API unsupported for camera — request stream directly
       }
 
       await startCameraStream(() => isMounted);
@@ -250,6 +307,32 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, [startCameraStream]);
 
+  // Clean up countdown / focus timers on unmount
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    };
+  }, []);
+
+  // Keyboard shortcuts (Space to snap, Escape to close options or exit)
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (isOptionsOpen) {
+          setIsOptionsOpen(false);
+        } else {
+          onClose();
+        }
+      } else if (e.key === ' ' && !isOptionsOpen && permissionState === 'granted') {
+        e.preventDefault();
+        triggerShutterWithTimer();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
   function stopCamera() {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -257,23 +340,60 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   }
 
-  async function toggleTorch() {
-    if (!streamRef.current) return;
-    const track = streamRef.current.getVideoTracks()[0];
-    if (track) {
-      try {
-        await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
-          advanced: [{ torch: !torchOn }],
-        });
-        setTorchOn(!torchOn);
-      } catch (err) {
-        console.warn('Torch constraint error', err);
+  async function toggleLightAssist() {
+    if (hasTorch && streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+            advanced: [{ torch: !torchOn }],
+          });
+          setTorchOn(!torchOn);
+          return;
+        } catch (err) {
+          console.warn('Torch constraint error', err);
+        }
       }
     }
+    // Fallback / front camera soft-light bezel boost
+    setScreenFlashOn((v) => !v);
   }
 
   function flipCamera() {
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
+  }
+
+  async function handleViewfinderTap(e: React.PointerEvent<HTMLDivElement>) {
+    if (isOptionsOpen || permissionState !== 'granted' || !viewfinderRef.current) return;
+    const rect = viewfinderRef.current.getBoundingClientRect();
+    const x = Math.max(0.08, Math.min(0.92, (e.clientX - rect.left) / rect.width));
+    const y = Math.max(0.08, Math.min(0.92, (e.clientY - rect.top) / rect.height));
+    setFocusPoint({ x, y });
+
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    focusTimerRef.current = setTimeout(() => setFocusPoint(null), 1300);
+
+    if (streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+            advanced: [{ focusMode: 'single-shot' }],
+          });
+          setTimeout(async () => {
+            try {
+              await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+                advanced: [{ focusMode: 'continuous' }],
+              });
+            } catch {
+              // ignore
+            }
+          }, 900);
+        } catch {
+          // Focus mode constraints unsupported on this webcam/browser
+        }
+      }
+    }
   }
 
   function captureVideoFrame(): string {
@@ -290,34 +410,53 @@ export const CameraView: React.FC<CameraViewProps> = ({
       ctx.scale(-1, 1);
     }
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.95);
+    return canvas.toDataURL('image/jpeg', 0.96);
+  }
+
+  function buildActiveCaptureSettings(targetMode: ScanMode): {
+    filter: FilterPreset;
+    adjustments: AdjustmentParams;
+  } {
+    const filter: FilterPreset =
+      targetMode === 'receipt' && captureFilter === 'magic' ? 'bw' : captureFilter;
+
+    const shadowRemoval = shadowLevel !== 'off';
+    const shadowStrength = shadowLevel === 'strong' ? 95 : shadowLevel === 'balanced' ? 78 : 0;
+    const sharpnessBoost = clarityLevel === 'ultra' ? 42 : 18;
+
+    const adjustments: AdjustmentParams = {
+      brightness: targetMode === 'receipt' ? 8 : 4,
+      contrast: targetMode === 'receipt' ? 28 : clarityLevel === 'ultra' ? 20 : 12,
+      sharpness: sharpnessBoost,
+      warmth: 0,
+      saturation: filter === 'magic' ? 10 : 0,
+      shadowRemoval,
+      shadowStrength,
+    };
+
+    return { filter, adjustments };
   }
 
   /**
-   * Applies perspective dewarp + shadow removal + mode preset enhancement
-   * while preserving rawOriginal untouched.
+   * Applies full-paper perspective dewarp + shadow flattening + selected enhancement filter
+   * while preserving original capture untouched for "Hold to Compare".
    */
   async function rectifyAndEnhanceCapture(
     rawDataUrl: string,
     targetMode: ScanMode,
     useVideoLiveCrop: boolean
   ): Promise<{ rectifiedOriginal: string; enhancedUrl: string; filter: FilterPreset; adjustments: AdjustmentParams }> {
-    const preferredFilter = getAppSettings().defaultFilter;
-    const filter: FilterPreset =
-      targetMode === 'receipt' && preferredFilter === 'magic' ? 'bw' : preferredFilter;
-    const adjustments: AdjustmentParams = {
-      brightness: targetMode === 'receipt' ? 8 : 4,
-      contrast: targetMode === 'receipt' ? 25 : 15,
-      sharpness: 25,
-      warmth: 0,
-      saturation: 0,
-      shadowRemoval: true,
-    };
+    const { filter, adjustments } = buildActiveCaptureSettings(targetMode);
 
     let rectifiedOriginal = rawDataUrl;
     const cornersToCrop = smoothedCornersRef.current || detectedArea?.corners;
 
-    if (autoProjectEnabled && useVideoLiveCrop && cornersToCrop) {
+    if (
+      autoProjectEnabled &&
+      framingMode === 'auto_paper' &&
+      useVideoLiveCrop &&
+      cornersToCrop
+    ) {
       try {
         rectifiedOriginal = await perspectiveCrop(rawDataUrl, cornersToCrop);
       } catch {
@@ -327,6 +466,37 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     const enhancedUrl = await processImage(rectifiedOriginal, filter, adjustments, 0);
     return { rectifiedOriginal, enhancedUrl, filter, adjustments };
+  }
+
+  function triggerShutterWithTimer() {
+    if (isProcessing) return;
+
+    // Cancel running countdown if clicked again
+    if (countdownLeft !== null) {
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+      setCountdownLeft(null);
+      return;
+    }
+
+    if (timerSeconds === 0) {
+      handleShutter();
+      return;
+    }
+
+    let rem = timerSeconds;
+    setCountdownLeft(rem);
+    countdownTimerRef.current = setInterval(() => {
+      rem -= 1;
+      if (rem <= 0) {
+        if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+        setCountdownLeft(null);
+        handleShutter();
+      } else {
+        setCountdownLeft(rem);
+      }
+    }, 1000);
   }
 
   async function handleShutter() {
@@ -465,7 +635,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
           filter,
           label: `Page ${capturedPages.length + 1}`,
           adjustments,
-          cropCorners: smoothedCornersRef.current || detectedArea?.corners,
+          cropCorners:
+            framingMode === 'auto_paper'
+              ? smoothedCornersRef.current || detectedArea?.corners
+              : undefined,
           createdAt: Date.now(),
         };
 
@@ -486,17 +659,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     setIsProcessing(true);
     const newPages: PageItem[] = [...capturedPages];
-    const preferredFilter = getAppSettings().defaultFilter;
-    const defaultFilter: FilterPreset =
-      mode === 'receipt' && preferredFilter === 'magic' ? 'bw' : preferredFilter;
-    const defaultAdj: AdjustmentParams = {
-      brightness: 4,
-      contrast: 15,
-      sharpness: 20,
-      warmth: 0,
-      saturation: 0,
-      shadowRemoval: true,
-    };
+    const { filter, adjustments } = buildActiveCaptureSettings(mode);
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -506,30 +669,31 @@ export const CameraView: React.FC<CameraViewProps> = ({
         reader.readAsDataURL(file);
       });
 
-      // Detect document edges & perspective-correct uploaded photo automatically
       let croppedUrl = dataUrl;
-      try {
-        const detected = await detectDocumentAndTextCorners(dataUrl);
-        if (detected.confidence >= 0.65) {
-          croppedUrl = await perspectiveCrop(dataUrl, detected.corners);
+      if (framingMode === 'auto_paper') {
+        try {
+          const detected = await detectDocumentAndTextCorners(dataUrl);
+          if (detected.confidence >= 0.65) {
+            croppedUrl = await perspectiveCrop(dataUrl, detected.corners);
+          }
+        } catch {
+          croppedUrl = dataUrl;
         }
-      } catch {
-        croppedUrl = dataUrl;
       }
 
-      const processed = await processImage(croppedUrl, defaultFilter, defaultAdj, 0);
+      const processed = await processImage(croppedUrl, filter, adjustments, 0);
       const thumb = await createThumbnail(processed);
 
       newPages.push({
         id: 'p_' + Date.now() + '_' + i,
-        originalDataUrl: dataUrl,
+        originalDataUrl: croppedUrl,
         processedDataUrl: processed,
         thumbnailUrl: thumb,
         pageNumber: newPages.length + 1,
         rotation: 0,
-        filter: defaultFilter,
+        filter,
         label: `Page ${newPages.length + 1}`,
-        adjustments: defaultAdj,
+        adjustments,
         createdAt: Date.now(),
       });
     }
@@ -563,6 +727,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   async function loadSampleForMode(targetMode: ScanMode) {
     setIsProcessing(true);
     try {
+      const { filter, adjustments } = buildActiveCaptureSettings(targetMode);
       const dataUrl = createSimulatedScanFrame(targetMode, 'front');
       const thumb = await createThumbnail(dataUrl);
 
@@ -580,9 +745,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
             thumbnailUrl: stitchedThumb,
             pageNumber: 1,
             rotation: 0,
-            filter: 'magic',
+            filter,
             label: 'A4 Recto-Verso (Front & Back)',
-            adjustments: { brightness: 5, contrast: 20, sharpness: 25, warmth: 0, saturation: 0, shadowRemoval: true },
+            adjustments,
             createdAt: Date.now(),
           },
           {
@@ -592,9 +757,9 @@ export const CameraView: React.FC<CameraViewProps> = ({
             thumbnailUrl: thumb,
             pageNumber: 2,
             rotation: 0,
-            filter: 'magic',
+            filter,
             label: 'Front Side',
-            adjustments: { brightness: 0, contrast: 15, sharpness: 20, warmth: 0, saturation: 0, shadowRemoval: true },
+            adjustments,
             createdAt: Date.now(),
           },
           {
@@ -604,18 +769,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
             thumbnailUrl: backThumb,
             pageNumber: 3,
             rotation: 0,
-            filter: 'magic',
+            filter,
             label: 'Back Side',
-            adjustments: { brightness: 0, contrast: 15, sharpness: 20, warmth: 0, saturation: 0, shadowRemoval: true },
+            adjustments,
             createdAt: Date.now(),
           },
         ];
 
         onSaveDocument('Sample Driver License (Recto-Verso)', 'id_card', pages);
       } else {
-        const filter: FilterPreset = targetMode === 'receipt' ? 'bw' : 'magic';
-        const adj: AdjustmentParams = { brightness: 5, contrast: 25, sharpness: 25, warmth: 0, saturation: 0, shadowRemoval: true };
-        const processed = await processImage(dataUrl, filter, adj, 0);
+        const processed = await processImage(dataUrl, filter, adjustments, 0);
         const procThumb = await createThumbnail(processed);
         const page: PageItem = {
           id: 'p_sample_' + Date.now(),
@@ -626,7 +789,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           rotation: 0,
           filter,
           label: 'Page 1',
-          adjustments: adj,
+          adjustments,
           createdAt: Date.now(),
         };
         onSaveDocument(`Sample ${targetMode.toUpperCase()} Scan`, targetMode, [page]);
@@ -636,6 +799,33 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   }
 
+  // Subtle CSS viewfinder preview hint reflecting chosen live filter
+  const liveVideoFilterCss =
+    captureFilter === 'bw'
+      ? 'grayscale(1) contrast(1.42) brightness(1.06)'
+      : captureFilter === 'grayscale'
+      ? 'grayscale(1) contrast(1.18)'
+      : captureFilter === 'eco'
+      ? 'grayscale(0.7) contrast(1.22) brightness(1.08)'
+      : captureFilter === 'magic'
+      ? 'contrast(1.12) saturate(1.12) brightness(1.03)'
+      : 'none';
+
+  const isLowLight = Boolean(
+    videoRef.current &&
+      videoRef.current.readyState >= 2 &&
+      (detectedArea?.avgLuminance ?? 140) < 62 &&
+      !torchOn &&
+      !screenFlashOn
+  );
+
+  const hasCustomOptions =
+    shadowLevel !== 'strong' ||
+    clarityLevel !== 'ultra' ||
+    framingMode !== 'auto_paper' ||
+    timerSeconds !== 0 ||
+    resolutionMode !== 'hd';
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col select-none overflow-hidden text-slate-100">
       {isShutterFlashing && (
@@ -643,24 +833,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
       )}
 
       {/* TOP BAR */}
-      <div className="relative z-20 flex items-center justify-between px-4 py-3 bg-slate-950/85 backdrop-blur-md border-b border-slate-800">
+      <div className="relative z-20 flex items-center justify-between px-3 sm:px-4 py-2.5 bg-slate-950/90 backdrop-blur-md border-b border-slate-800 gap-2">
         <button
           onClick={onClose}
-          className="w-10 h-10 rounded-full flex items-center justify-center bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition-colors"
-          title="Cancel"
+          className="w-9 h-9 rounded-full flex items-center justify-center bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition-colors shrink-0"
+          title="Close Scanner (Esc)"
         >
-          <X className="w-5 h-5" />
+          <X className="w-4 h-4" />
         </button>
 
-        <div className="text-center">
-          <div className="text-sm font-semibold tracking-wide text-white">
+        <div className="text-center min-w-0">
+          <div className="text-xs sm:text-sm font-semibold tracking-wide text-white truncate">
             {mode === 'id_card' && 'ID CARD (RECTO-VERSO)'}
             {mode === 'passport' && 'PASSPORT SCAN'}
             {mode === 'document' && 'MULTI-PAGE DOCUMENT'}
             {mode === 'receipt' && 'RECEIPT SCANNER'}
             {mode === 'book' && 'BOOK (DUAL-PAGE SPLIT)'}
           </div>
-          <div className="text-xs text-slate-400">
+          <div className="text-[11px] text-slate-400">
             {mode === 'id_card'
               ? idStep === 'front'
                 ? 'Step 1 of 2: Snap Front Side'
@@ -669,8 +859,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Auto-Capture Toggle (Auto-Projection remains permanently ON) */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Auto-Snap Lock */}
           <button
             onClick={() => setAutoCaptureEnabled((v) => !v)}
             className={`px-2.5 h-9 rounded-full flex items-center gap-1.5 text-[11px] font-semibold border transition-colors ${
@@ -681,21 +871,50 @@ export const CameraView: React.FC<CameraViewProps> = ({
             title="Automatically capture when document corners stabilize"
           >
             <Timer className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{autoCaptureEnabled ? 'Auto-Snap ON' : 'Manual'}</span>
+            <span className="hidden md:inline">{autoCaptureEnabled ? 'Auto-Snap' : 'Manual'}</span>
           </button>
 
-          {hasTorch && (
-            <button
-              onClick={toggleTorch}
-              className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
-                torchOn ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/80 hover:bg-slate-700 text-slate-200'
-              }`}
-              title="Torch / Flash"
-            >
-              {torchOn ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
-            </button>
-          )}
+          {/* 3x3 Framing Grid */}
+          <button
+            onClick={() => setShowGrid((v) => !v)}
+            className={`w-9 h-9 rounded-full flex items-center justify-center border transition-colors ${
+              showGrid
+                ? 'bg-blue-500/20 border-blue-400/60 text-blue-200'
+                : 'bg-slate-800/80 border-slate-700 hover:bg-slate-700 text-slate-300'
+            }`}
+            title="Toggle 3x3 framing grid"
+          >
+            <Grid3x3 className="w-4 h-4" />
+          </button>
 
+          {/* Torch / Screen Soft-Fill */}
+          <button
+            onClick={toggleLightAssist}
+            className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
+              torchOn || screenFlashOn
+                ? 'bg-amber-400 text-slate-950'
+                : 'bg-slate-800/80 hover:bg-slate-700 text-slate-200'
+            }`}
+            title={hasTorch ? 'Toggle Camera Torch' : 'Toggle Soft Screen Fill Light'}
+          >
+            {torchOn || screenFlashOn ? <Zap className="w-4 h-4" /> : <ZapOff className="w-4 h-4" />}
+          </button>
+
+          {/* Scanner Pro Options */}
+          <button
+            onClick={() => setIsOptionsOpen((v) => !v)}
+            className={`relative px-2.5 h-9 rounded-full flex items-center gap-1.5 text-[11px] font-semibold border transition-colors ${
+              isOptionsOpen || hasCustomOptions
+                ? 'bg-blue-500/20 border-blue-400/60 text-blue-100'
+                : 'bg-slate-800/80 border-slate-700 hover:bg-slate-700 text-slate-200'
+            }`}
+            title="Scanner quality, shadow flattening & framing options"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Options</span>
+          </button>
+
+          {/* Flip Camera */}
           <button
             onClick={flipCamera}
             className="w-9 h-9 rounded-full flex items-center justify-center bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition-colors"
@@ -707,28 +926,208 @@ export const CameraView: React.FC<CameraViewProps> = ({
       </div>
 
       {/* VIEWFINDER AREA */}
-      <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+      <div
+        ref={viewfinderRef}
+        onPointerDown={handleViewfinderTap}
+        className={`relative flex-1 bg-black flex items-center justify-center overflow-hidden ${
+          screenFlashOn ? 'ring-[14px] ring-inset ring-white/90' : ''
+        }`}
+      >
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted
-          className="absolute inset-0 w-full h-full object-cover"
+          style={{ filter: liveVideoFilterCss }}
+          className="absolute inset-0 w-full h-full object-cover transition-[filter] duration-200"
         />
 
-        {/* PERMANENT ORTHOGONAL AUTO-PROJECTION OVERLAY WITH LIGHT TRANSPARENT BLUE WASH */}
+        {/* FULL PAPER-SURFACE ORTHOGONAL LIGHT-BLUE PROJECTION OVERLAY */}
         <RealtimeDocumentOverlay
           detectedArea={detectedArea}
           scanMode={mode}
-          modeAccentColor="#3B82F6"
-          isTextDetected={isTextDetected}
+          isTextDetected={true}
           videoElement={videoRef.current}
           autoCaptureProgress={autoCaptureProgress}
-          autoCaptureEnabled={autoCaptureEnabled}
+          autoCaptureEnabled={autoCaptureEnabled && countdownLeft === null && !isOptionsOpen}
+          fullFrameMode={framingMode === 'full_frame'}
+          showGrid={showGrid}
+          focusPoint={focusPoint}
           onSmoothedCornersUpdate={(corners) => {
             smoothedCornersRef.current = corners;
           }}
         />
+
+        {/* LOW-LIGHT REALITY CARE ACTION PILL */}
+        {isLowLight && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleLightAssist();
+            }}
+            className="absolute top-12 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-[11px] flex items-center gap-1.5 shadow-lg transition-colors"
+          >
+            <Sun className="w-3.5 h-3.5" />
+            <span>{hasTorch ? 'Low light · Turn on Flash' : 'Low light · Soft Screen Light'}</span>
+          </button>
+        )}
+
+        {/* HANDS-FREE COUNTDOWN OVERLAY */}
+        {countdownLeft !== null && (
+          <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-slate-950/35">
+            <div className="w-24 h-24 rounded-2xl bg-slate-950/85 border border-blue-400/60 flex flex-col items-center justify-center shadow-2xl">
+              <span className="text-4xl font-bold text-white tabular-nums">{countdownLeft}</span>
+              <span className="text-[10px] text-blue-200 mt-0.5">Hold steady</span>
+            </div>
+          </div>
+        )}
+
+        {/* EXPANDABLE PRO SCANNER OPTIONS DRAWER */}
+        {isOptionsOpen && (
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute top-3 right-3 left-3 sm:left-auto sm:w-80 z-30 bg-slate-950/95 backdrop-blur-lg border border-slate-700 rounded-xl p-4 shadow-2xl space-y-3.5 text-xs max-h-[82%] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <span className="font-bold text-white flex items-center gap-1.5">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-blue-400" />
+                <span>Scanner Options</span>
+              </span>
+              <button
+                onClick={() => setIsOptionsOpen(false)}
+                className="w-7 h-7 rounded-lg flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-slate-300"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Paper Surface Crop Mode */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
+                <Maximize2 className="w-3 h-3 text-blue-400" />
+                <span>Paper Surface Framing</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { id: 'auto_paper', label: 'Auto Paper Crop' },
+                  { id: 'full_frame', label: 'Full Frame (100%)' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setFramingMode(opt.id as FramingMode)}
+                    className={`min-h-[36px] px-2.5 py-1.5 rounded-lg border font-medium transition-colors ${
+                      framingMode === opt.id
+                        ? 'bg-blue-500/20 border-blue-400 text-blue-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Shadow & Crease Flattening */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-400">
+                Shadow &amp; Crease Flattening
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { id: 'off', label: 'Off' },
+                  { id: 'balanced', label: 'Balanced' },
+                  { id: 'strong', label: 'Strong' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setShadowLevel(opt.id as ShadowLevel)}
+                    className={`min-h-[36px] px-2 py-1.5 rounded-lg border font-medium transition-colors ${
+                      shadowLevel === opt.id
+                        ? 'bg-[#7C3AED]/30 border-[#A78BFA] text-violet-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Reality Care Sharpness & Clarity */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
+                <Focus className="w-3 h-3 text-blue-400" />
+                <span>Text Clarity &amp; Sharpness</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { id: 'standard', label: 'Natural Print' },
+                  { id: 'ultra', label: 'Ultra Crisp Text' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setClarityLevel(opt.id as ClarityLevel)}
+                    className={`min-h-[36px] px-2.5 py-1.5 rounded-lg border font-medium transition-colors ${
+                      clarityLevel === opt.id
+                        ? 'bg-[#7C3AED]/30 border-[#A78BFA] text-violet-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Hands-Free Self-Timer */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-400">
+                Anti-Shake Self-Timer
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[0, 2, 5].map((sec) => (
+                  <button
+                    key={sec}
+                    onClick={() => setTimerSeconds(sec as 0 | 2 | 5)}
+                    className={`min-h-[36px] px-2 py-1.5 rounded-lg border font-medium transition-colors ${
+                      timerSeconds === sec
+                        ? 'bg-blue-500/20 border-blue-400 text-blue-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {sec === 0 ? 'Instant' : `${sec}s Delay`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sensor Resolution */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-400">
+                Camera Resolution
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { id: 'hd', label: 'HD (1080p Fast)' },
+                  { id: 'ultra', label: 'Ultra 4K (Max)' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setResolutionMode(opt.id as ResolutionMode)}
+                    className={`min-h-[36px] px-2.5 py-1.5 rounded-lg border font-medium transition-colors ${
+                      resolutionMode === opt.id
+                        ? 'bg-[#7C3AED]/30 border-[#A78BFA] text-violet-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {permissionState === 'needs_prompt' && !cameraError && (
           <div className="absolute inset-0 z-30 flex items-center justify-center p-5 bg-slate-950/80 backdrop-blur-sm">
@@ -739,7 +1138,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
               <div className="space-y-1.5">
                 <h2 className="text-sm font-bold text-[#1C1B22]">Camera access for scanning</h2>
                 <p className="text-xs text-[#666672] leading-relaxed">
-                  NScanner uses your camera to detect page edges and scan documents directly. Captured photos stay on your device.
+                  NScanner detects full paper borders and enhances lighting directly on your device.
                 </p>
               </div>
               <div className="flex flex-col gap-2 pt-1">
@@ -769,7 +1168,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
         )}
 
         {cameraError && (
-          <div className="absolute top-16 inset-x-4 z-30 p-3.5 rounded-xl bg-slate-900/95 border border-slate-700 text-white text-xs flex flex-col sm:flex-row sm:items-center gap-3 backdrop-blur-md">
+          <div className="absolute top-14 inset-x-4 z-30 p-3.5 rounded-xl bg-slate-900/95 border border-slate-700 text-white text-xs flex flex-col sm:flex-row sm:items-center gap-3 backdrop-blur-md">
             <div className="flex items-start gap-2.5 flex-1">
               <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <div className="leading-relaxed text-slate-200">{cameraError}</div>
@@ -849,7 +1248,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
                 </span>
               </div>
               <div className="text-center text-xs text-emerald-200/90">
-                Adaptive B&amp;W + Shadow Removal
+                Sauvola B&amp;W + Shadow Removal
               </div>
               <div className="text-[10px] text-slate-400 text-center">Align narrow paper strip</div>
             </div>
@@ -878,7 +1277,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         {/* EXPANDABLE BATCH SCANNING TRAY */}
         {capturedPages.length > 0 && (
-          <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-2 max-w-[72%]">
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute bottom-3 left-3 z-20 flex flex-col gap-2 max-w-[72%]"
+          >
             {isBatchTrayOpen && (
               <div className="flex items-center gap-2 p-2 rounded-xl bg-slate-900/95 backdrop-blur-md border border-slate-700 overflow-x-auto shadow-2xl">
                 {capturedPages.map((p, idx) => (
@@ -926,8 +1328,37 @@ export const CameraView: React.FC<CameraViewProps> = ({
       </div>
 
       {/* BOTTOM CONTROLS */}
-      <div className="relative z-20 bg-slate-950 border-t border-slate-800 pb-6 pt-3 px-4">
-        <div className="flex items-center justify-center gap-2 overflow-x-auto pb-3 scrollbar-none text-xs">
+      <div className="relative z-20 bg-slate-950 border-t border-slate-800 pb-5 pt-2.5 px-4 space-y-2.5">
+        {/* Live Capture Enhancement Preset Strip */}
+        <div className="flex items-center justify-center gap-1.5 overflow-x-auto scrollbar-none text-[11px]">
+          {(
+            [
+              { id: 'magic', label: 'Magic Color' },
+              { id: 'bw', label: 'Crisp B&W' },
+              { id: 'grayscale', label: 'Grayscale' },
+              { id: 'eco', label: 'Eco Clean' },
+              { id: 'original', label: 'Original' },
+            ] as const
+          ).map((f) => {
+            const active = captureFilter === f.id;
+            return (
+              <button
+                key={f.id}
+                onClick={() => setCaptureFilter(f.id)}
+                className={`px-2.5 py-1 rounded-md whitespace-nowrap font-medium border transition-colors ${
+                  active
+                    ? 'bg-blue-500/20 border-blue-400/70 text-blue-100 font-semibold'
+                    : 'bg-slate-900/70 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Scan Mode Strip */}
+        <div className="flex items-center justify-center gap-2 overflow-x-auto pb-1 scrollbar-none text-xs">
           {[
             { id: 'id_card', label: 'ID Card (2-Sided)', icon: CreditCard },
             { id: 'passport', label: 'Passport', icon: FileText },
@@ -960,7 +1391,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
           })}
         </div>
 
-        <div className="flex items-center justify-between max-w-md mx-auto pt-2">
+        {/* Shutter Row */}
+        <div className="flex items-center justify-between max-w-md mx-auto pt-0.5">
           <div>
             <input
               ref={fileInputRef}
@@ -982,7 +1414,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
           <div className="flex flex-col items-center">
             <button
-              onClick={handleShutter}
+              onClick={triggerShutterWithTimer}
               disabled={isProcessing}
               className={`relative w-20 h-20 rounded-full flex items-center justify-center border-4 transition-transform active:scale-95 ${
                 mode === 'id_card'
@@ -995,19 +1427,27 @@ export const CameraView: React.FC<CameraViewProps> = ({
                   mode === 'id_card' ? 'bg-emerald-500' : 'bg-white'
                 }`}
               />
-              <Camera
-                className={`absolute w-6 h-6 ${
-                  mode === 'id_card' ? 'text-slate-950' : 'text-slate-900'
-                }`}
-              />
+              {countdownLeft !== null ? (
+                <span className="absolute text-lg font-extrabold text-slate-900">{countdownLeft}</span>
+              ) : (
+                <Camera
+                  className={`absolute w-6 h-6 ${
+                    mode === 'id_card' ? 'text-slate-950' : 'text-slate-900'
+                  }`}
+                />
+              )}
             </button>
             <span className="text-[11px] font-medium text-slate-300 mt-1.5">
               {isProcessing
-                ? 'Processing...'
+                ? 'Enhancing...'
+                : countdownLeft !== null
+                ? 'Tap to cancel'
                 : mode === 'id_card'
                 ? idStep === 'front'
                   ? 'Snap Front (1/2)'
                   : 'Snap Back (2/2)'
+                : timerSeconds > 0
+                ? `Scan (${timerSeconds}s Timer)`
                 : 'Take Scan'}
             </span>
           </div>

@@ -9,6 +9,7 @@ export interface AdjustmentParams {
   warmth: number;     // -50 to 50, default 0 (cool to warm)
   saturation: number; // -100 to 100, default 0
   shadowRemoval?: boolean; // Local illumination normalization
+  shadowStrength?: number; // 0 to 100 illumination flattening intensity
 }
 
 export interface CornerPoint {

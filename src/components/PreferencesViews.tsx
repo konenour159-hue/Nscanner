@@ -12,6 +12,7 @@ import {
 import { AppSettings, FilterPreset, ScanMode } from '../types/scanner';
 import { DetailedStorageStats } from '../utils/storage';
 import { PWAInstallButton } from './PWAInstallButton';
+import { ScannerBenchmarkPanel } from './ScannerBenchmarkPanel';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -337,6 +338,8 @@ export const HelpSupportView: React.FC<HelpSupportViewProps> = ({
           </div>
         ))}
       </div>
+
+      <ScannerBenchmarkPanel />
 
       <div className="bg-white border border-[#E6E6EB] rounded-lg p-5 flex flex-wrap items-center justify-between gap-3">
         <div>
