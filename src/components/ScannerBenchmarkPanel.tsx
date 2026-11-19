@@ -6,7 +6,7 @@ import {
   processImage,
 } from '../utils/imageProcessing';
 import { generateDocumentPdf } from '../utils/pdfGenerator';
-import { AdjustmentParams, ScannedDocument } from '../types/scanner';
+import { AdjustmentParams, QuadCorners, ScannedDocument } from '../types/scanner';
 
 interface BenchmarkResult {
   sourceLabel: string;
@@ -14,6 +14,7 @@ interface BenchmarkResult {
   edgeDetectAvgMs: number;
   trackingFps: number;
   paperCoveragePct: number;
+  skewAngleDeg: number;
   cropMs: number;
   magicColorMs: number;
   sauvolaBwMs: number;
@@ -23,7 +24,7 @@ interface BenchmarkResult {
   croppedRawUrl: string;
   magicUrl: string;
   bwUrl: string;
-  detectedCorners: { x: number; y: number; width: number; height: number };
+  detectedQuad: QuadCorners;
 }
 
 /**
@@ -54,29 +55,47 @@ function buildRealisticShadowedSheetScene(): string {
     ctx.stroke();
   }
 
-  // Physical A4 paper sheet (warm dim indoor tone)
-  const px = 310;
-  const py = 80;
-  const pw = 1300;
-  const ph = 920;
+  // Physical A4 paper sheet with realistic camera tilt & perspective trapezoid (~7 deg)
+  const tl = { x: 405, y: 120 };
+  const tr = { x: 1525, y: 74 };
+  const br = { x: 1620, y: 970 };
+  const bl = { x: 295, y: 928 };
 
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(tl.x, tl.y);
+  ctx.lineTo(tr.x, tr.y);
+  ctx.lineTo(br.x, br.y);
+  ctx.lineTo(bl.x, bl.y);
+  ctx.closePath();
   ctx.fillStyle = '#E5DEC9';
-  ctx.fillRect(px, py, pw, ph);
+  ctx.fill();
+  ctx.clip();
+
+  // Rotate interior typography slightly to match tilted sheet orientation
+  ctx.translate(960, 520);
+  ctx.rotate(-0.032);
+  ctx.translate(-960, -520);
+
+  const px = 380;
+  const py = 120;
+  const pw = 1160;
+  const ph = 820;
 
   // Document header & fine typography
   ctx.fillStyle = '#1E293B';
   ctx.font = 'bold 34px Georgia, serif';
-  ctx.fillText('SERVICE AGREEMENT & INSPECTION REPORT', px + 72, py + 96);
+  ctx.fillText('SERVICE AGREEMENT & INSPECTION REPORT', px + 62, py + 96);
 
   ctx.fillStyle = '#475569';
   ctx.font = '20px Inter, sans-serif';
-  ctx.fillText('Reference: NS-2026-8841  |  Facility Audit  |  Page 1 of 2', px + 72, py + 138);
+  ctx.fillText('Reference: NS-2026-8841  |  Facility Audit  |  Page 1 of 2', px + 62, py + 138);
 
   ctx.strokeStyle = '#94A3B8';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(px + 72, py + 162);
-  ctx.lineTo(px + pw - 72, py + 162);
+  ctx.moveTo(px + 62, py + 162);
+  ctx.lineTo(px + pw - 62, py + 162);
   ctx.stroke();
 
   const lines = [
@@ -85,17 +104,17 @@ function buildRealisticShadowedSheetScene(): string {
     '   ambient indoor lighting conditions.',
     '2. Automatic shadow flattening divides out low-frequency illumination variance while preserving',
     '   blue signatures, ink stamps, and thin printed serif characters without halo artifacts.',
-    '3. Searchable PDF export maintains compact JPEG encoding aligned to A4 300-DPI fidelity.',
+    '3. Perspective quad contour warping straightens angled sheets cleanly to A4 proportions.',
   ];
   ctx.fillStyle = '#1F2937';
   ctx.font = '22px Georgia, serif';
   lines.forEach((line, idx) => {
-    ctx.fillText(line, px + 72, py + 220 + idx * 44);
+    ctx.fillText(line, px + 62, py + 220 + idx * 44);
   });
 
   // Colored blue company stamp + handwritten signature
   ctx.save();
-  ctx.translate(px + 960, py + 660);
+  ctx.translate(px + 860, py + 620);
   ctx.rotate(-0.07);
   ctx.strokeStyle = '#1D4ED8';
   ctx.lineWidth = 4;
@@ -111,7 +130,8 @@ function buildRealisticShadowedSheetScene(): string {
   grad.addColorStop(0.45, 'rgba(15, 23, 42, 0.44)');
   grad.addColorStop(1, 'rgba(15, 23, 42, 0.22)');
   ctx.fillStyle = grad;
-  ctx.fillRect(px, py, pw, ph);
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
 
   return canvas.toDataURL('image/jpeg', 0.9);
 }
@@ -219,8 +239,15 @@ export const ScannerBenchmarkPanel: React.FC = () => {
       const pdfSizeKb = Math.round(pdfRes.sizeBytes / 1024);
       URL.revokeObjectURL(pdfRes.url);
 
-      const surf = lastDetect.documentSurface;
-      const paperCoveragePct = Math.round(surf.width * surf.height * 100);
+      const q = lastDetect.corners;
+      const pts = [q.topLeft, q.topRight, q.bottomRight, q.bottomLeft];
+      let polyArea = 0;
+      for (let i = 0; i < 4; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % 4];
+        polyArea += a.x * b.y - b.x * a.y;
+      }
+      const paperCoveragePct = Math.round(Math.abs(polyArea) * 0.5 * 100);
 
       setResult({
         sourceLabel: label,
@@ -228,6 +255,7 @@ export const ScannerBenchmarkPanel: React.FC = () => {
         edgeDetectAvgMs: Number(edgeDetectAvgMs.toFixed(1)),
         trackingFps,
         paperCoveragePct,
+        skewAngleDeg: lastDetect.skewAngleDeg,
         cropMs: Number(cropMs.toFixed(1)),
         magicColorMs: Number(magicColorMs.toFixed(0)),
         sauvolaBwMs: Number(sauvolaBwMs.toFixed(0)),
@@ -237,7 +265,7 @@ export const ScannerBenchmarkPanel: React.FC = () => {
         croppedRawUrl,
         magicUrl,
         bwUrl,
-        detectedCorners: surf,
+        detectedQuad: q,
       });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Benchmark failed');
@@ -348,11 +376,13 @@ export const ScannerBenchmarkPanel: React.FC = () => {
             </div>
 
             <div className="bg-[#FAFAFC] border border-[#E6E6EB] rounded-lg p-2.5">
-              <div className="text-[10px] text-[#666672]">Paper Crop</div>
+              <div className="text-[10px] text-[#666672]">Paper Dewarp</div>
               <div className="text-sm font-bold text-[#1C1B22] font-mono tabular-nums mt-0.5">
                 {result.cropMs} ms
               </div>
-              <div className="text-[10px] text-[#666672]">Orthogonal GPU</div>
+              <div className="text-[10px] text-[#666672]">
+                Quad ({result.skewAngleDeg}° tilt)
+              </div>
             </div>
 
             <div className="bg-[#FAFAFC] border border-[#E6E6EB] rounded-lg p-2.5">
@@ -384,24 +414,30 @@ export const ScannerBenchmarkPanel: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="space-y-1.5">
               <div className="text-[11px] font-semibold text-[#666672]">
-                1. Raw Input &amp; Locked Paper Box
+                1. Raw Input &amp; Locked Paper Contour
               </div>
-              <div className="relative rounded-lg border border-[#E6E6EB] overflow-hidden bg-slate-900 aspect-video flex items-center justify-center">
-                <img
-                  src={result.rawPreviewUrl}
-                  alt="Raw input"
-                  className="w-full h-full object-contain"
-                />
-                {/* Show actual normalized paper lock rectangle */}
-                <div
-                  style={{
-                    left: `${result.detectedCorners.x * 100}%`,
-                    top: `${result.detectedCorners.y * 100}%`,
-                    width: `${result.detectedCorners.width * 100}%`,
-                    height: `${result.detectedCorners.height * 100}%`,
-                  }}
-                  className="absolute border-2 border-blue-400 bg-blue-400/15 pointer-events-none"
-                />
+              <div className="rounded-lg border border-[#E6E6EB] overflow-hidden bg-slate-900 aspect-video flex items-center justify-center p-1">
+                <div className="relative inline-block max-w-full max-h-full">
+                  <img
+                    src={result.rawPreviewUrl}
+                    alt="Raw input"
+                    className="block max-w-full max-h-full object-contain"
+                  />
+                  {/* Pixel-accurate 4-corner perspective paper polygon overlay */}
+                  <svg
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                  >
+                    <polygon
+                      points={`${result.detectedQuad.topLeft.x * 100},${result.detectedQuad.topLeft.y * 100} ${result.detectedQuad.topRight.x * 100},${result.detectedQuad.topRight.y * 100} ${result.detectedQuad.bottomRight.x * 100},${result.detectedQuad.bottomRight.y * 100} ${result.detectedQuad.bottomLeft.x * 100},${result.detectedQuad.bottomLeft.y * 100}`}
+                      fill="rgba(96, 165, 250, 0.16)"
+                      stroke="#60A5FA"
+                      strokeWidth="1.2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                </div>
               </div>
             </div>
 

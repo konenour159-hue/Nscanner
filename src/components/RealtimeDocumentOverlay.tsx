@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { QuadCorners, ScanMode } from '../types/scanner';
-import { DetectedAreaResult } from '../utils/imageProcessing';
+import { computeVideoVisibleCrop, DetectedAreaResult } from '../utils/imageProcessing';
 import { Check } from 'lucide-react';
 
 interface RealtimeDocumentOverlayProps {
@@ -16,69 +16,62 @@ interface RealtimeDocumentOverlayProps {
   onSmoothedCornersUpdate?: (corners: QuadCorners) => void;
 }
 
-interface RectBox {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-}
+function getDefaultCornersForMode(mode: ScanMode, fullFrame = false): QuadCorners {
+  let l = 0.09;
+  let t = 0.08;
+  let r = 0.91;
+  let b = 0.92;
 
-function getDefaultRectForMode(mode: ScanMode, fullFrame = false): RectBox {
   if (fullFrame) {
-    return { left: 0.04, top: 0.04, right: 0.96, bottom: 0.96 };
-  }
-  switch (mode) {
-    case 'id_card':
-      return { left: 0.14, top: 0.28, right: 0.86, bottom: 0.72 };
-    case 'passport':
-      return { left: 0.12, top: 0.22, right: 0.88, bottom: 0.78 };
-    case 'receipt':
-      return { left: 0.24, top: 0.08, right: 0.76, bottom: 0.92 };
-    case 'book':
-      return { left: 0.07, top: 0.16, right: 0.93, bottom: 0.84 };
-    default:
-      return { left: 0.09, top: 0.08, right: 0.91, bottom: 0.92 };
-  }
-}
-
-/**
- * Normalizes any detected bounds into a strictly orthogonal 90-degree rectangle
- * spanning the entire physical paper section — never restricted to a sub-box of text.
- */
-function cornersToOrthogonalPaperRect(
-  detectedArea?: DetectedAreaResult | null,
-  fallbackMode: ScanMode = 'document',
-  fullFrame = false
-): RectBox {
-  if (fullFrame) return getDefaultRectForMode(fallbackMode, true);
-  if (!detectedArea?.corners) return getDefaultRectForMode(fallbackMode, false);
-
-  const c = detectedArea.corners;
-  const surf = detectedArea.documentSurface;
-
-  const rawLeft = surf ? surf.x : (c.topLeft.x + c.bottomLeft.x) * 0.5;
-  const rawTop = surf ? surf.y : (c.topLeft.y + c.topRight.y) * 0.5;
-  const rawRight = surf ? surf.x + surf.width : (c.topRight.x + c.bottomRight.x) * 0.5;
-  const rawBottom = surf ? surf.y + surf.height : (c.bottomLeft.y + c.bottomRight.y) * 0.5;
-
-  const left = Math.max(0.04, Math.min(0.32, rawLeft));
-  const right = Math.min(0.96, Math.max(0.68, rawRight));
-  const top = Math.max(0.04, Math.min(0.32, rawTop));
-  const bottom = Math.min(0.96, Math.max(0.68, rawBottom));
-
-  if (right - left < 0.36 || bottom - top < 0.34) {
-    return getDefaultRectForMode(fallbackMode, false);
+    l = 0.03;
+    t = 0.03;
+    r = 0.97;
+    b = 0.97;
+  } else {
+    switch (mode) {
+      case 'id_card':
+        l = 0.14;
+        t = 0.28;
+        r = 0.86;
+        b = 0.72;
+        break;
+      case 'passport':
+        l = 0.12;
+        t = 0.22;
+        r = 0.88;
+        b = 0.78;
+        break;
+      case 'receipt':
+        l = 0.24;
+        t = 0.08;
+        r = 0.76;
+        b = 0.92;
+        break;
+      case 'book':
+        l = 0.07;
+        t = 0.16;
+        r = 0.93;
+        b = 0.84;
+        break;
+      default:
+        break;
+    }
   }
 
-  return { left, top, right, bottom };
-}
-
-function rectToCorners(r: RectBox): QuadCorners {
   return {
-    topLeft: { x: r.left, y: r.top },
-    topRight: { x: r.right, y: r.top },
-    bottomRight: { x: r.right, y: r.bottom },
-    bottomLeft: { x: r.left, y: r.bottom },
+    topLeft: { x: l, y: t },
+    topRight: { x: r, y: t },
+    bottomRight: { x: r, y: b },
+    bottomLeft: { x: l, y: b },
+  };
+}
+
+function cloneQuad(q: QuadCorners): QuadCorners {
+  return {
+    topLeft: { ...q.topLeft },
+    topRight: { ...q.topRight },
+    bottomRight: { ...q.bottomRight },
+    bottomLeft: { ...q.bottomLeft },
   };
 }
 
@@ -95,6 +88,7 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
+  const boxSizeRef = useRef<{ w: number; h: number }>({ w: 800, h: 600 });
 
   useEffect(() => {
     const el = containerRef.current;
@@ -102,7 +96,9 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     const updateSize = () => {
       const rect = el.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        setBoxSize({ w: rect.width, h: rect.height });
+        const next = { w: rect.width, h: rect.height };
+        boxSizeRef.current = next;
+        setBoxSize(next);
       }
     };
     updateSize();
@@ -111,47 +107,51 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     return () => obs.disconnect();
   }, []);
 
-  const initialRect = getDefaultRectForMode(scanMode, fullFrameMode);
-  const currentRectRef = useRef<RectBox>({ ...initialRect });
-  const targetRectRef = useRef<RectBox>({ ...initialRect });
+  const initialQuad = getDefaultCornersForMode(scanMode, fullFrameMode);
+  const currentQuadRef = useRef<QuadCorners>(cloneQuad(initialQuad));
+  const targetQuadRef = useRef<QuadCorners>(cloneQuad(initialQuad));
 
-  const [smoothedRect, setSmoothedRect] = useState<RectBox>({ ...initialRect });
+  const [smoothedQuad, setSmoothedQuad] = useState<QuadCorners>(cloneQuad(initialQuad));
   const [scanProgress, setScanProgress] = useState<number>(0.15);
   const miniCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Sync mode switches or full-frame toggle immediately
   useEffect(() => {
     if (fullFrameMode || !videoElement || videoElement.readyState < 2) {
-      targetRectRef.current = getDefaultRectForMode(scanMode, fullFrameMode);
+      targetQuadRef.current = getDefaultCornersForMode(scanMode, fullFrameMode);
     }
   }, [scanMode, fullFrameMode, videoElement]);
 
-  // Apply hysteresis deadzone before updating target paper rect so boundary never jitters
+  // Apply hysteresis deadzone per corner so detected quad hugs any document angle cleanly without micro-jitter
   useEffect(() => {
     if (fullFrameMode) {
-      targetRectRef.current = getDefaultRectForMode(scanMode, true);
+      targetQuadRef.current = getDefaultCornersForMode(scanMode, true);
       return;
     }
-    if (detectedArea?.corners) {
-      const nextRect =
-        videoElement && videoElement.readyState >= 2
-          ? cornersToOrthogonalPaperRect(detectedArea, scanMode, false)
-          : getDefaultRectForMode(scanMode, false);
+    if (detectedArea?.corners && videoElement && videoElement.readyState >= 2) {
+      const next = detectedArea.paperDetected
+        ? detectedArea.corners
+        : getDefaultCornersForMode(scanMode, false);
 
-      const prev = targetRectRef.current;
+      const prev = targetQuadRef.current;
       const delta = Math.max(
-        Math.abs(nextRect.left - prev.left),
-        Math.abs(nextRect.top - prev.top),
-        Math.abs(nextRect.right - prev.right),
-        Math.abs(nextRect.bottom - prev.bottom)
+        Math.abs(next.topLeft.x - prev.topLeft.x),
+        Math.abs(next.topLeft.y - prev.topLeft.y),
+        Math.abs(next.topRight.x - prev.topRight.x),
+        Math.abs(next.topRight.y - prev.topRight.y),
+        Math.abs(next.bottomRight.x - prev.bottomRight.x),
+        Math.abs(next.bottomRight.y - prev.bottomRight.y),
+        Math.abs(next.bottomLeft.x - prev.bottomLeft.x),
+        Math.abs(next.bottomLeft.y - prev.bottomLeft.y)
       );
-      if (delta > 0.012) {
-        targetRectRef.current = nextRect;
+
+      if (delta > 0.0085) {
+        targetQuadRef.current = cloneQuad(next);
       }
     }
   }, [detectedArea, scanMode, fullFrameMode, videoElement]);
 
-  // Smooth spring-lerp + calm optical sweep across entire document paper sheet
+  // Smooth spring-lerp across all 4 quad corners + calm optical sweep clipped inside paper polygon
   useEffect(() => {
     let animId: number;
     let scanPos = 0.05;
@@ -164,14 +164,18 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
     const updateFrame = () => {
-      const target = targetRectRef.current;
-      const curr = currentRectRef.current;
-      const factor = 0.18;
+      const target = targetQuadRef.current;
+      const curr = currentQuadRef.current;
+      const factor = 0.24;
 
-      curr.left = lerp(curr.left, target.left, factor);
-      curr.top = lerp(curr.top, target.top, factor);
-      curr.right = lerp(curr.right, target.right, factor);
-      curr.bottom = lerp(curr.bottom, target.bottom, factor);
+      curr.topLeft.x = lerp(curr.topLeft.x, target.topLeft.x, factor);
+      curr.topLeft.y = lerp(curr.topLeft.y, target.topLeft.y, factor);
+      curr.topRight.x = lerp(curr.topRight.x, target.topRight.x, factor);
+      curr.topRight.y = lerp(curr.topRight.y, target.topRight.y, factor);
+      curr.bottomRight.x = lerp(curr.bottomRight.x, target.bottomRight.x, factor);
+      curr.bottomRight.y = lerp(curr.bottomRight.y, target.bottomRight.y, factor);
+      curr.bottomLeft.x = lerp(curr.bottomLeft.x, target.bottomLeft.x, factor);
+      curr.bottomLeft.y = lerp(curr.bottomLeft.y, target.bottomLeft.y, factor);
 
       if (!prefersReduced) {
         scanPos += 0.0048 * scanDir;
@@ -187,9 +191,9 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
         setScanProgress(0.5);
       }
 
-      const copy: RectBox = { ...curr };
-      setSmoothedRect(copy);
-      onSmoothedCornersUpdate?.(rectToCorners(copy));
+      const copy = cloneQuad(curr);
+      setSmoothedQuad(copy);
+      onSmoothedCornersUpdate?.(copy);
 
       animId = requestAnimationFrame(updateFrame);
     };
@@ -198,7 +202,7 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     return () => cancelAnimationFrame(animId);
   }, [onSmoothedCornersUpdate]);
 
-  // Live rectified paper thumbnail preview (~10 FPS)
+  // Live cropped paper thumbnail preview (~10 FPS), 1:1 synced with CSS object-cover viewport
   useEffect(() => {
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let isCancelled = false;
@@ -215,12 +219,23 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
 
       const vidW = videoElement.videoWidth || 640;
       const vidH = videoElement.videoHeight || 480;
-      const r = currentRectRef.current;
+      const crop = computeVideoVisibleCrop(
+        vidW,
+        vidH,
+        boxSizeRef.current.w,
+        boxSizeRef.current.h
+      );
 
-      const sx = r.left * vidW;
-      const sy = r.top * vidH;
-      const sw = Math.max(16, (r.right - r.left) * vidW);
-      const sh = Math.max(16, (r.bottom - r.top) * vidH);
+      const q = currentQuadRef.current;
+      const minX = Math.min(q.topLeft.x, q.bottomLeft.x);
+      const maxX = Math.max(q.topRight.x, q.bottomRight.x);
+      const minY = Math.min(q.topLeft.y, q.topRight.y);
+      const maxY = Math.max(q.bottomLeft.y, q.bottomRight.y);
+
+      const sx = crop.sx + minX * crop.sw;
+      const sy = crop.sy + minY * crop.sh;
+      const sw = Math.max(16, (maxX - minX) * crop.sw);
+      const sh = Math.max(16, (maxY - minY) * crop.sh);
 
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -238,22 +253,65 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     };
   }, [videoElement]);
 
-  // Strict orthogonal pixel rectangle spanning the FULL DOCUMENT / PAPER SURFACE
-  const rectX = Math.round(smoothedRect.left * boxSize.w);
-  const rectY = Math.round(smoothedRect.top * boxSize.h);
-  const rectW = Math.max(88, Math.round((smoothedRect.right - smoothedRect.left) * boxSize.w));
-  const rectH = Math.max(88, Math.round((smoothedRect.bottom - smoothedRect.top) * boxSize.h));
+  // Pixel coordinates of the 4 smoothed corners tightly hugging the paper shape
+  const tl = { x: smoothedQuad.topLeft.x * boxSize.w, y: smoothedQuad.topLeft.y * boxSize.h };
+  const tr = { x: smoothedQuad.topRight.x * boxSize.w, y: smoothedQuad.topRight.y * boxSize.h };
+  const br = {
+    x: smoothedQuad.bottomRight.x * boxSize.w,
+    y: smoothedQuad.bottomRight.y * boxSize.h,
+  };
+  const bl = {
+    x: smoothedQuad.bottomLeft.x * boxSize.w,
+    y: smoothedQuad.bottomLeft.y * boxSize.h,
+  };
 
-  // Full-paper optical scan sweep across the entire document height
-  const sweepY = rectY + scanProgress * rectH;
-  const trailHeight = 36;
+  const polyPoints = `${tl.x.toFixed(1)},${tl.y.toFixed(1)} ${tr.x.toFixed(1)},${tr.y.toFixed(1)} ${br.x.toFixed(1)},${br.y.toFixed(1)} ${bl.x.toFixed(1)},${bl.y.toFixed(1)}`;
+
+  // Edge lengths for bracket proportions
+  const topLen = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+  const rightLen = Math.hypot(br.x - tr.x, br.y - tr.y);
+  const bottomLen = Math.hypot(bl.x - br.x, bl.y - br.y);
+  const leftLen = Math.hypot(tl.x - bl.x, tl.y - bl.y);
+  const minEdgePx = Math.max(64, Math.min(topLen, rightLen, bottomLen, leftLen));
+  const bracketLeg = Math.min(26, Math.max(13, Math.round(minEdgePx * 0.11)));
+
+  // Edge-aligned corner L-bracket path builder
+  const buildCornerBracket = (
+    c: { x: number; y: number },
+    a: { x: number; y: number },
+    b: { x: number; y: number }
+  ) => {
+    const da = Math.max(1, Math.hypot(a.x - c.x, a.y - c.y));
+    const db = Math.max(1, Math.hypot(b.x - c.x, b.y - c.y));
+    const p1x = c.x + ((a.x - c.x) / da) * bracketLeg;
+    const p1y = c.y + ((a.y - c.y) / da) * bracketLeg;
+    const p2x = c.x + ((b.x - c.x) / db) * bracketLeg;
+    const p2y = c.y + ((b.y - c.y) / db) * bracketLeg;
+    return `M ${p1x.toFixed(1)} ${p1y.toFixed(1)} L ${c.x.toFixed(1)} ${c.y.toFixed(1)} L ${p2x.toFixed(1)} ${p2y.toFixed(1)}`;
+  };
+
+  // Bilinear point interpolation helper for perspective-matched grid & optical sweep beam
+  const lerpPt = (
+    p: { x: number; y: number },
+    q: { x: number; y: number },
+    t: number
+  ) => ({
+    x: p.x + (q.x - p.x) * t,
+    y: p.y + (q.y - p.y) * t,
+  });
+
+  const sweepLeadL = lerpPt(tl, bl, scanProgress);
+  const sweepLeadR = lerpPt(tr, br, scanProgress);
+  const trailT = Math.max(0, scanProgress - 0.11);
+  const sweepTailL = lerpPt(tl, bl, trailT);
+  const sweepTailR = lerpPt(tr, br, trailT);
+  const sweepTrailPoly = `${sweepTailL.x.toFixed(1)},${sweepTailL.y.toFixed(1)} ${sweepTailR.x.toFixed(1)},${sweepTailR.y.toFixed(1)} ${sweepLeadR.x.toFixed(1)},${sweepLeadR.y.toFixed(1)} ${sweepLeadL.x.toFixed(1)},${sweepLeadL.y.toFixed(1)}`;
 
   const isLocked = autoCaptureEnabled && autoCaptureProgress > 0.08;
   const isLowLight = (detectedArea?.avgLuminance ?? 140) < 62;
   const isSoftFocus = (detectedArea?.sharpnessScore ?? 0.8) < 0.28;
-  const bracketLeg = Math.min(24, Math.max(14, Math.round(Math.min(rectW, rectH) * 0.085)));
 
-  let statusLabel = fullFrameMode ? 'Full Frame Capture' : 'Document Surface Aligned';
+  let statusLabel = fullFrameMode ? 'Full Frame Capture' : 'Align Paper Inside Frame';
   if (isLocked) {
     statusLabel = `Hold steady · ${Math.round(autoCaptureProgress * 100)}%`;
   } else if (videoElement && videoElement.readyState >= 2) {
@@ -262,7 +320,10 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     } else if (isSoftFocus) {
       statusLabel = 'Tap paper to focus cleanly';
     } else if (detectedArea?.paperDetected) {
-      statusLabel = 'Paper Sheet Locked';
+      statusLabel =
+        (detectedArea.skewAngleDeg ?? 0) >= 2.2
+          ? 'Paper Contour Matched'
+          : 'Paper Sheet Locked';
     }
   }
 
@@ -275,32 +336,26 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
         className="w-full h-full absolute inset-0"
       >
         <defs>
-          {/* Outer cutout strictly matching the full squared paper rectangle */}
+          {/* Outer cutout strictly matching the 4-corner perspective paper polygon */}
           <mask id="ns-paper-doc-mask">
             <rect width={boxSize.w} height={boxSize.h} fill="white" />
-            <rect x={rectX} y={rectY} width={rectW} height={rectH} rx="10" fill="black" />
+            <polygon points={polyPoints} fill="black" />
           </mask>
 
-          {/* Clip sweep & grid cleanly inside the document paper rect */}
+          {/* Clip sweep & perspective grid cleanly inside the paper polygon */}
           <clipPath id="ns-paper-clip">
-            <rect x={rectX} y={rectY} width={rectW} height={rectH} rx="10" />
+            <polygon points={polyPoints} />
           </clipPath>
 
-          {/* Unified very light, almost-transparent blue glass wash covering the ENTIRE paper section */}
+          {/* Very light, almost-transparent blue glass wash covering the ENTIRE document quad */}
           <linearGradient id="ns-paper-surface-wash" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="#93C5FD" stopOpacity="0.13" />
+            <stop offset="0%" stopColor="#93C5FD" stopOpacity="0.14" />
             <stop offset="50%" stopColor="#60A5FA" stopOpacity="0.08" />
-            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.12" />
-          </linearGradient>
-
-          {/* Soft vertical optical scan trail across full paper section */}
-          <linearGradient id="ns-paper-scan-trail" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stopColor="#60A5FA" stopOpacity="0" />
-            <stop offset="100%" stopColor="#93C5FD" stopOpacity="0.2" />
+            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.13" />
           </linearGradient>
         </defs>
 
-        {/* Gentle darkened desk surround outside the full paper rectangle */}
+        {/* Gentle darkened desk surround outside the exact physical paper quad */}
         <rect
           width={boxSize.w}
           height={boxSize.h}
@@ -308,63 +363,64 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
           mask="url(#ns-paper-doc-mask)"
         />
 
-        {/* Polished, uniform, almost-transparent blue projection plate across the ENTIRE paper sheet */}
-        <rect
-          x={rectX}
-          y={rectY}
-          width={rectW}
-          height={rectH}
-          rx="10"
+        {/* Polished, uniform, almost-transparent blue projection plate tightly marrying the paper */}
+        <polygon
+          points={polyPoints}
           fill="url(#ns-paper-surface-wash)"
-          stroke="rgba(147, 197, 253, 0.72)"
-          strokeWidth="1.5"
+          stroke={isLocked ? 'rgba(96, 165, 250, 0.92)' : 'rgba(147, 197, 253, 0.78)'}
+          strokeWidth={isLocked ? 2 : 1.5}
+          strokeLinejoin="round"
         />
 
-        {/* Clipped interior full-paper optical scan sweep & optional alignment grid */}
+        {/* Clipped interior optical scan sweep & bilinear 3x3 framing grid */}
         <g clipPath="url(#ns-paper-clip)">
           {showGrid && (
-            <g stroke="rgba(191, 219, 254, 0.28)" strokeWidth="1">
-              <line x1={rectX + rectW / 3} y1={rectY} x2={rectX + rectW / 3} y2={rectY + rectH} />
-              <line x1={rectX + (rectW * 2) / 3} y1={rectY} x2={rectX + (rectW * 2) / 3} y2={rectY + rectH} />
-              <line x1={rectX} y1={rectY + rectH / 3} x2={rectX + rectW} y2={rectY + rectH / 3} />
-              <line x1={rectX} y1={rectY + (rectH * 2) / 3} x2={rectX + rectW} y2={rectY + (rectH * 2) / 3} />
+            <g stroke="rgba(191, 219, 254, 0.32)" strokeWidth="1">
+              {[1 / 3, 2 / 3].map((t) => {
+                const topP = lerpPt(tl, tr, t);
+                const botP = lerpPt(bl, br, t);
+                const leftP = lerpPt(tl, bl, t);
+                const rightP = lerpPt(tr, br, t);
+                return (
+                  <React.Fragment key={t}>
+                    <line x1={topP.x} y1={topP.y} x2={botP.x} y2={botP.y} />
+                    <line x1={leftP.x} y1={leftP.y} x2={rightP.x} y2={rightP.y} />
+                  </React.Fragment>
+                );
+              })}
             </g>
           )}
 
-          {/* Full-width optical scan sweep spanning the entire document paper */}
-          <rect
-            x={rectX}
-            y={sweepY - trailHeight}
-            width={rectW}
-            height={trailHeight}
-            fill="url(#ns-paper-scan-trail)"
-          />
+          {/* Soft perspective-aligned optical scan beam */}
+          <polygon points={sweepTrailPoly} fill="rgba(147, 197, 253, 0.14)" />
           <line
-            x1={rectX}
-            y1={sweepY}
-            x2={rectX + rectW}
-            y2={sweepY}
+            x1={sweepLeadL.x}
+            y1={sweepLeadL.y}
+            x2={sweepLeadR.x}
+            y2={sweepLeadR.y}
             stroke="rgba(191, 219, 254, 0.88)"
             strokeWidth="1.5"
           />
         </g>
 
-        {/* 4 Precision Architectural Corner L-Brackets */}
+        {/* 4 Edge-Aligned Precision Corner L-Brackets + Vertex Anchor Nodes */}
         {[
-          `M ${rectX} ${rectY + bracketLeg} L ${rectX} ${rectY} L ${rectX + bracketLeg} ${rectY}`,
-          `M ${rectX + rectW - bracketLeg} ${rectY} L ${rectX + rectW} ${rectY} L ${rectX + rectW} ${rectY + bracketLeg}`,
-          `M ${rectX + rectW} ${rectY + rectH - bracketLeg} L ${rectX + rectW} ${rectY + rectH} L ${rectX + rectW - bracketLeg} ${rectY + rectH}`,
-          `M ${rectX + bracketLeg} ${rectY + rectH} L ${rectX} ${rectY + rectH} L ${rectX} ${rectY + rectH - bracketLeg}`,
-        ].map((pathD, idx) => (
-          <path
-            key={idx}
-            d={pathD}
-            fill="none"
-            stroke="#BFDBFE"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          { d: buildCornerBracket(tl, tr, bl), pt: tl },
+          { d: buildCornerBracket(tr, tl, br), pt: tr },
+          { d: buildCornerBracket(br, tr, bl), pt: br },
+          { d: buildCornerBracket(bl, tl, br), pt: bl },
+        ].map(({ d, pt }, idx) => (
+          <g key={idx}>
+            <path
+              d={d}
+              fill="none"
+              stroke="#BFDBFE"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <circle cx={pt.x} cy={pt.y} r="3" fill="#93C5FD" stroke="#1E3A8A" strokeWidth="1" />
+          </g>
         ))}
       </svg>
 
@@ -393,7 +449,7 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
         <span className="font-medium tracking-tight whitespace-nowrap">{statusLabel}</span>
       </div>
 
-      {/* Live Straightened Paper Thumbnail (Desktop / Tablet viewports when camera is active) */}
+      {/* Live Cropped Paper Thumbnail (Desktop / Tablet viewports when camera is active) */}
       {videoElement && videoElement.readyState >= 2 && (
         <div className="absolute bottom-3 right-3 z-20 hidden sm:flex flex-col items-center bg-slate-950/80 backdrop-blur-md p-1.5 rounded-lg border border-blue-400/35 shadow-lg">
           <canvas
@@ -411,3 +467,4 @@ export const RealtimeDocumentOverlay: React.FC<RealtimeDocumentOverlayProps> = (
     </div>
   );
 };
+

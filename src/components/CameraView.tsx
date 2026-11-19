@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { ScanMode, PageItem, QuadCorners, FilterPreset, AdjustmentParams } from '../types/scanner';
 import {
+  computeVideoVisibleCrop,
   createThumbnail,
   stitchRectoVerso,
   splitBookPages,
@@ -134,7 +135,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
     async function detectFrame() {
       if (videoRef.current && videoRef.current.readyState >= 2) {
         try {
-          const result = await detectDocumentAndTextCorners(videoRef.current);
+          const result = await detectDocumentAndTextCorners(videoRef.current, {
+            viewWidth: viewfinderRef.current?.clientWidth || videoRef.current.videoWidth,
+            viewHeight: viewfinderRef.current?.clientHeight || videoRef.current.videoHeight,
+          });
           const now = Date.now();
           const dt = Math.min(350, Math.max(20, now - lastTickAt));
           lastTickAt = now;
@@ -399,17 +403,29 @@ export const CameraView: React.FC<CameraViewProps> = ({
   function captureVideoFrame(): string {
     if (!videoRef.current) return '';
     const video = videoRef.current;
+    const vidW = video.videoWidth || 1280;
+    const vidH = video.videoHeight || 720;
+    const viewW = viewfinderRef.current?.clientWidth || vidW;
+    const viewH = viewfinderRef.current?.clientHeight || vidH;
+    const crop = computeVideoVisibleCrop(vidW, vidH, viewW, viewH);
+
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
+    canvas.width = Math.max(1, Math.round(crop.sw));
+    canvas.height = Math.max(1, Math.round(crop.sh));
     const ctx = canvas.getContext('2d');
     if (!ctx) return '';
 
-    if (facingMode === 'user') {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(
+      video,
+      crop.sx,
+      crop.sy,
+      crop.sw,
+      crop.sh,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
     return canvas.toDataURL('image/jpeg', 0.96);
   }
 
@@ -942,7 +958,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
           className="absolute inset-0 w-full h-full object-cover transition-[filter] duration-200"
         />
 
-        {/* FULL PAPER-SURFACE ORTHOGONAL LIGHT-BLUE PROJECTION OVERLAY */}
+        {/* FULL PAPER-SURFACE PERSPECTIVE CONTOUR LIGHT-BLUE PROJECTION OVERLAY */}
         <RealtimeDocumentOverlay
           detectedArea={detectedArea}
           scanMode={mode}
